@@ -148,6 +148,7 @@
   <span class="stat">nodes <b id="s-nodes">0</b></span>
   <span class="stat hide-sm">pages <b id="s-pages">0</b></span>
   <span class="stat">tokens <b id="s-tokens">0</b></span>
+  <span class="stat hide-sm">workers <b id="s-workers">0</b></span>
   <span class="stat hide-sm">run <b id="s-run">0</b></span>
   <span class="dot" id="dot"></span>
 </header>
@@ -183,7 +184,7 @@
 <script>
 const $ = (id) => document.getElementById(id);
 const el = { dag: $('dag'), term: $('terminal'), pages: $('pages') };
-const stat = { nodes: $('s-nodes'), pages: $('s-pages'), tokens: $('s-tokens'), run: $('s-run') };
+const stat = { nodes: $('s-nodes'), pages: $('s-pages'), tokens: $('s-tokens'), run: $('s-run'), workers: $('s-workers') };
 let ws = null, retry = 0, lastLogLen = -1, pinnedBottom = true;
 
 function wsBase() {
@@ -214,6 +215,7 @@ function render(s) {
   stat.pages.textContent = (s.pages || []).length;
   stat.tokens.textContent = s.tokens || 0;
   stat.run.textContent = s.running || 0;
+  if (stat.workers) stat.workers.textContent = s.workers || 0;
 
   el.dag.innerHTML = (s.dag || []).map(n =>
     `<div class="node ${esc(n.status)} ${esc(n.kind)}">` +

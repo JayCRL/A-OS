@@ -55,6 +55,7 @@ class AOS:
         self.max_rounds = int(os.environ.get("AOS_MAX_ROUNDS", "6"))
         self.encoder = load_encoder()
         self.journal = Journal(self.home / "tasks.db")
+        self.broker = None
         self.budget = int(os.environ.get("AOS_CTX_BUDGET", "8000"))
         self.log: list[str] = []
         self._running = True
@@ -338,7 +339,20 @@ class AOS:
             "log": self.log[-120:],
             "tokens": self.kernel.usage.total,
             "running": len(self.sched.stats()["running"]),
+            "workers": getattr(self, "_workers", 0),
         }
+
+    async def watch_workers(self) -> None:
+        """后台刷新集群 worker 数量，供控制台显示。"""
+
+        from cluster.broker import Broker
+        self.broker = Broker()
+        while True:
+            try:
+                self._workers = len(await self.broker.workers())
+            except Exception:  # noqa: BLE001
+                self._workers = 0
+            await asyncio.sleep(10)
 
     async def inject(self, text: str) -> None:
         self.emit(f"> {text}", cls="sys")
@@ -395,6 +409,7 @@ async def main() -> None:
             if arg == "--port" and i + 1 < len(_sys.argv):
                 port = int(_sys.argv[i + 1])
         events = asyncio.create_task(aos.event_loop())
+        asyncio.create_task(aos.watch_workers())
         try:
             await serve(aos, "0.0.0.0", port)
         finally:
