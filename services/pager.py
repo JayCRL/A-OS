@@ -114,11 +114,13 @@ class PagerService:
     def begin_turn(self, pid: int, text: str) -> dict:
         text = (text or "").strip()
         self._reap_old_pids(pid, keep=2)
-        self.dialogue.add("user", text)
+        turn = self.dialogue.add("user", text)
         self._roll_pages(pid)
         shown = text if len(text) <= 4000 else text[:4000] + "…（已截断）"
         self.mmu.add(f"用户：{shown}", segment=Segment.HUMAN, pinned=True,
                      tag="turn", importance=1.0, pid=pid)
+        # 新 pid 没有上一轮的热页；从对话史导入最近几轮，接住"要""继续"这种指代
+        self._import_history(pid, before_id=turn.id, limit=8)
 
         # 系统页每轮刷新时间，内容仍是同一页
         sys_text = persona.system_prompt()
@@ -234,6 +236,19 @@ class PagerService:
         if user:
             self.memory.add(user, kind="episode", importance=0.4, source="chat")
         return {"pages": self.mmu.stats(), "graph": self.graph.stats()}
+
+    def _import_history(self, pid: int, *, before_id: int, limit: int = 8) -> None:
+        """把最近几轮对话映射成当前进程的 DAG_STATE 页。"""
+
+        for turn in self.dialogue.recent(limit=limit, before_id=before_id):
+            who = "用户" if turn.role == "user" else "A-OS"
+            content = f"{who}：{turn.text[:1200]}"
+            self.mmu.upsert(
+                content, source=f"hist:{turn.id}",
+                vec=self.encoder.encode_one(content[:800]),
+                importance=0.65, tag="history",
+                segment=Segment.DAG_STATE, pid=pid,
+            )
 
     def _reap_old_pids(self, current: int, *, keep: int = 2) -> None:
         """进程退出后，旧 pid 的工作集降温；只保留最近 keep 个进程活跃。"""

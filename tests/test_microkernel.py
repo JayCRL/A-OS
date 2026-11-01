@@ -244,6 +244,16 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.close()
 
+    async def test_recent_history_crosses_processes(self) -> None:
+        model = ScriptModel(["第一轮：百度热搜有几条", "第二轮：好的，再刷一次"])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        await self.mk.ask("刚才热搜有哪些")
+        await self.mk.ask("要")
+        prompt = model.prompts[-1][-1]["content"]
+        self.assertIn("第一轮：百度热搜有几条", prompt)
+        self.assertIn("用户：要", prompt)
+
     async def test_concurrent_asks_have_isolated_segments(self) -> None:
         echo = EchoModel()
         self.mk.model = echo
