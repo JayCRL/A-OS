@@ -34,6 +34,22 @@ class ScriptModel:
         return ModelReply(self.answers.pop(0) if self.answers else "好的。", Usage(10, 5))
 
 
+class FactModel:
+    ready = True
+
+    def __init__(self) -> None:
+        self.usage = Usage()
+
+    async def chat(self, messages, *, max_tokens=512, temperature=0.3):
+        system = str(messages[0].get("content", ""))
+        if "编目器" in system:
+            return ModelReply(
+                '{"noise": true, "facts": [{"text": "用户叫阿测", "kind": "identity", "importance": 0.95}]}',
+                Usage(10, 10),
+            )
+        return ModelReply("好，记住了。", Usage(10, 5))
+
+
 class EchoModel:
     ready = True
 
@@ -140,6 +156,15 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         stats = await self.mk.bus.call("kernel", "stats")
         self.assertGreaterEqual(stats["processes"].get("total", 0), 1, stats)
         self.assertGreaterEqual(stats["processes"].get("waiting", 0), 1, stats)
+
+    async def test_facts_from_extractor_enter_profile(self) -> None:
+        model = FactModel()
+        self.mk.model = model
+        self.mk.librarian.model = model
+        await self.mk.ask("我叫阿测")
+        await self.mk.bus.call("librarian", "flush")
+        profile = [m.text for m in self.mk.pager.memory.profile()]
+        self.assertTrue(any("阿测" in text for text in profile), profile)
 
     async def test_auto_prefetch_loads_graph_pages(self) -> None:
         await self._seed()

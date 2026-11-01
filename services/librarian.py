@@ -19,11 +19,15 @@ from kernel.graph import GraphStore
 SYSTEM = """你是 A-OS 的编目器。判断这一轮对话是否属于一个可归档的任务。
 
 只输出一个 JSON 对象，不要解释：
-{"noise": false, "module": "模块名", "task": "任务名", "success": false,
+{"noise": false,
+ "facts": [{"text": "第三人称陈述", "kind": "identity|preference|fact|plan", "importance": 0.0}],
+ "module": "模块名", "task": "任务名", "success": false,
  "lesson": "一句经验", "artifact": "产物路径", "depends_on": []}
 
 规则：
-- 寒暄、问答、闲聊：{"noise": true}
+- facts 每轮都要抽：用户是谁、偏好、重要事实、计划；最多 4 条；寒暄/情绪/临时问答不算
+- facts 用第三人称，一条只讲一件事；没有就 []
+- noise 只表示"没有可归档的任务"，不代表没有 facts；纯闲聊也可以 noise=true 但有 facts
 - module 是项目里的模块/页面/文件，不是"用户"
 - task 是一件事，不是一句话
 - success 只在这件事确实完成时为 true
@@ -58,10 +62,11 @@ class LibrarianService:
     name = "librarian"
 
     def __init__(self, graph: GraphStore | None = None, *, model=None,
-                 backend=None, project: str = "main") -> None:
+                 backend=None, fact_sink=None, project: str = "main") -> None:
         self.graph = graph
         self.model = model
         self.backend = backend
+        self.fact_sink = fact_sink
         self.extractor = LLMExtractor(model)
         self.consolidator = Consolidator(graph, project=project) if graph is not None else None
         self.queue: asyncio.Queue = asyncio.Queue()
@@ -120,6 +125,16 @@ class LibrarianService:
             data = await self.extractor.extract(
                 str(item.get("user", "")), str(item.get("answer", ""))
             )
+        facts = list(data.get("facts") or [])
+        if not facts and "记住" in str(item.get("user", "")):
+            cleaned = str(item.get("user", "")).replace("记住", "").replace("记得", "").strip("，。 ：:")
+            if cleaned:
+                facts = [{"text": cleaned, "kind": "fact", "importance": 0.85}]
+        if facts:
+            if self.fact_sink is not None:
+                self.fact_sink(facts)
+            elif self.backend is not None:
+                await self.backend.call("pager", "commit_memory", items=facts)
         if data.get("noise") or not (data.get("module") or data.get("task")):
             self.skipped += 1
             return

@@ -64,7 +64,9 @@ class Microkernel:
         else:
             self.bus = MessageBus()
             self.pager = PagerService(self.home, self.encoder, bus=None)
-            self.librarian = LibrarianService(self.pager.graph, model=self.model)
+            self.librarian = LibrarianService(
+                self.pager.graph, model=self.model, fact_sink=self.pager.commit_memory,
+            )
             self.vfs = VFSService(self.home, self.encoder)
         self._last: dict = {}
         self._last_pid: int | None = None

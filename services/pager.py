@@ -60,6 +60,8 @@ class PagerService:
                 str(params.get("dag", "")), list(params.get("profile") or []),
                 set(params.get("must_include") or []), int(params.get("budget", 8000)),
             )
+        if method == "commit_memory":
+            return {"added": self.commit_memory(list(params.get("items") or []))}
         if method == "prefetch":
             return await self.prefetch(int(params["pid"]), str(params.get("query", "")))
         if method == "fault":
@@ -92,6 +94,11 @@ class PagerService:
         raise ValueError(f"pager 没有方法：{method}")
 
     # ---------- 一轮的页 ----------
+
+    def commit_memory(self, items: list[dict]) -> int:
+        if not items:
+            return 0
+        return self.memory.add_many(items, source="chat")
 
     def commit_episode(self, data: dict) -> dict:
         if self.consolidator is None:
@@ -137,8 +144,17 @@ class PagerService:
         wants_past = any(w in text for w in ("上次", "之前", "聊过", "说过", "那天", "刚才", "那个"))
         kinds = None if wants_past else ("identity", "preference", "fact", "plan", "summary")
         seen = {p.id for p in profile}
-        recalled = [m for _, m in self.memory.recall(text, k=8, kinds=kinds)
-                    if m.id not in seen]
+        # 多路探测：当前这句话 + 最近两轮用户话，避免笼统指代召回失败
+        probes = [text]
+        for turn in self.dialogue.recent(limit=4, before_id=turn.id):
+            if turn.role == "user" and turn.text not in probes:
+                probes.append(turn.text)
+        recalled = []
+        for probe in probes[:3]:
+            for _score, mem in self.memory.recall(probe, k=8, kinds=kinds):
+                if mem.id not in seen:
+                    seen.add(mem.id)
+                    recalled.append(mem)
         for mem in recalled:
             self.mmu.upsert(f"（长期记忆）{mem.text}", source=f"mem:{mem.id}",
                             vec=self.encoder.encode_one(mem.text),
