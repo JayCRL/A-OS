@@ -196,11 +196,20 @@ class AOS:
             node = self.dag.add(event.summary, parent_id=self._head.node_id if self._head else None,
                                 kind="goal" if self._head is None else "step")
         self._head = node
+        retired = 0
         for old in list(self.mmu._pages.values()):
             if old.segment is Segment.HUMAN:
                 old.segment = Segment.DATA
                 old.pinned = False
                 self.mmu._persist(old)
+            elif old.segment is Segment.DAG_STATE:
+                old.segment = Segment.DATA
+                old.pinned = False
+                self.mmu.swap_out(old.page_id)
+                retired += 1
+
+        if retired:
+            self.emit(f"[退场] 上一任务的 {retired} 个状态页降级为普通记忆", cls="sys")
         page = self.mmu.add(f"人类指令：{event.summary}", importance=1.0,
                             tag="interrupt", segment=Segment.HUMAN)
 
@@ -222,6 +231,8 @@ class AOS:
 
     async def _step(self, node, event, *, task_id: str | None = None, start_round: int = 0) -> None:
         summary = event.summary if event is not None else (node.content or "恢复任务")
+        self._retire_old_state()
+
         if self._is_doc_task(summary):
             await self._write_doc(summary, node, task_id=task_id)
             return
@@ -250,6 +261,8 @@ class AOS:
                 prompt += "\n\n最近两步：\n" + "\n".join(trace[-2:])
 
             action = None
+            written: set[tuple[str, str]] = locals().get("written") or set()
+            dup_hits: int = locals().get("dup_hits") or 0
             fault_targets: list[str] = []
             fault_seen: set[str] = locals().get("fault_seen") or set()
             out_tokens = int(os.environ.get("AOS_OUT_TOKENS", "3000"))
@@ -293,6 +306,22 @@ class AOS:
                 trace.append(hint)
                 self.emit(f"[退回] {hint[:70]}", cls="err")
                 continue
+
+            if action.name in ("write", "append"):
+                key = (str(action.args.get("path", "")), str(action.args.get("content", ""))[:200])
+                if key in written:
+                    dup_hits += 1
+                    self.emit("[去重] 内容和上次一样，直接收尾", cls="sys")
+                    trace.append("[系统] 这段内容你刚写过，没有变化。立刻输出 done。")
+                    if dup_hits >= 2:
+                        self.emit("内容已落盘，强制收尾", cls="sys")
+                        done_node = self.dag.add("完成：内容已写入，无变化", parent_id=current.node_id, kind="done")
+                        self._head = done_node
+                        if task_id:
+                            self.journal.finish(task_id)
+                        return
+                    continue
+                written.add(key)
 
             obs = await self.executor.run(action.name, action.args)
             guard.observe(action.name, action.args, obs.ok)
@@ -369,6 +398,19 @@ class AOS:
                                 importance=0.95, tag="pagefault", source=target)
             guard.observe("fault", {"path": target}, True)
             self.emit(f"[缺页中断] 换入 {target} → 页 #{page.page_id}", cls="fault")
+
+    def _retire_old_state(self) -> None:
+        """把上一任务的状态页降级成普通记忆，避免它赖在上下文里。"""
+
+        retired = 0
+        for page in list(self.mmu._pages.values()):
+            if page.segment is Segment.DAG_STATE and page.state.value == "active":
+                page.segment = Segment.DATA
+                page.pinned = False
+                self.mmu.swap_out(page.page_id)
+                retired += 1
+        if retired:
+            self.emit(f"[退场] 上一任务的 {retired} 个状态页降级为普通记忆", cls="sys")
 
     def _is_doc_task(self, summary: str) -> bool:
         return ("readme" in summary.lower() or ".md" in summary.lower()) and ("写" in summary or "生成" in summary)

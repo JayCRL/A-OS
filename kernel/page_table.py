@@ -66,6 +66,8 @@ class PageTable:
         self.weights = {**DEFAULT_WEIGHTS, **(weights or {})}
         self.max_active = max_active
         self.top_k = top_k
+        self.recall_threshold = 0.35
+        self.cold_threshold = 0.5
         self._pages: dict[int, Page] = {}
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -360,18 +362,35 @@ class PageTable:
         used = 0
         budget = budget_tokens
 
-        for _, page in self.ranked(query_vec=query_vec, only_active=True, segment=Segment.DATA):
+        cands: list[tuple[float, float, Page]] = []
+        for score, page in self.ranked(query_vec=query_vec, segment=Segment.DATA):
             if page.stale or page.pinned:
                 continue
-            if picked >= limit or used + page.tokens > budget:
-                if page.state is PageState.ACTIVE:
-                    self.swap_out(page.page_id)
+            sim = _cosine(query_vec, page.vec) if (query_vec and page.vec) else 0.0
+            cands.append((sim, score, page))
+
+        cutoff = 0.45
+        if cands and query_vec is not None:
+            best = max(c[0] for c in cands)
+            cutoff = max(cutoff, best * 0.8)
+
+        for sim, score, page in cands:
+            if query_vec is not None and sim < cutoff:
                 continue
+            if picked >= limit or used + page.tokens > budget:
+                break
             if page.state is PageState.SWAPPED:
                 self.swap_in(page.page_id)
             data_pages.append(page)
             picked += 1
             used += page.tokens
+
+        # 本轮没被选中的 DATA 页全部换出：内存里只留真正用到的
+        selected = {p.page_id for p in data_pages}
+        for page in list(self._pages.values()):
+            if (page.segment is Segment.DATA and page.state is PageState.ACTIVE
+                    and not page.pinned and page.page_id not in selected):
+                self.swap_out(page.page_id)
 
         resident = [p for p in self._pages.values()
                     if p.segment in (Segment.SYSTEM, Segment.HUMAN, Segment.DAG_STATE)
