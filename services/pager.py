@@ -65,7 +65,7 @@ class PagerService:
         if method == "stats":
             return {
                 "graph": self.graph.stats(),
-                "pages": self.mmu.stats(),
+                "pages": self.mmu.stats(pid=params.get("pid")),
                 "memory": self.memory.stats(),
                 "turns": self.dialogue.count(),
                 "faults": self.faults,
@@ -79,16 +79,16 @@ class PagerService:
     def begin_turn(self, pid: int, text: str) -> dict:
         text = (text or "").strip()
         self.dialogue.add("user", text)
-        self._roll_pages()
+        self._roll_pages(pid)
         shown = text if len(text) <= 4000 else text[:4000] + "…（已截断）"
         self.mmu.add(f"用户：{shown}", segment=Segment.HUMAN, pinned=True,
-                     tag="turn", importance=1.0)
+                     tag="turn", importance=1.0, pid=pid)
 
         # 系统页每轮刷新时间，内容仍是同一页
         sys_text = persona.system_prompt()
         self.mmu.upsert(sys_text, source="sys:persona",
                         vec=self.encoder.encode_one(sys_text),
-                        importance=1.0, tag="system", segment=Segment.SYSTEM)
+                        importance=1.0, tag="system", segment=Segment.SYSTEM, pid=0)
 
         profile = self.memory.profile()
         wants_past = any(w in text for w in ("上次", "之前", "聊过", "说过", "那天", "刚才", "那个"))
@@ -100,7 +100,7 @@ class PagerService:
             self.mmu.upsert(f"（长期记忆）{mem.text}", source=f"mem:{mem.id}",
                             vec=self.encoder.encode_one(mem.text),
                             importance=min(0.9, mem.importance),
-                            tag="memory", segment=Segment.DATA)
+                            tag="memory", segment=Segment.DATA, pid=pid)
         return {
             "pid": pid,
             "profile": [m.text for m in profile],
@@ -121,6 +121,7 @@ class PagerService:
             segments={"system": "", "human": "", "dag": dag_text},
             must_include=must_include,
             max_data=6,
+            pid=pid,
         )
         return {"prompt": prompt, "pages": ids, "budget": budget}
 
@@ -140,6 +141,7 @@ class PagerService:
                     self.graph.render(node), source=f"graph:{node.id}",
                     vec=node.vec if node.vec is not None else self.encoder.encode_one(node.title),
                     importance=node.importance, tag="graph", segment=Segment.DATA,
+                    pid=pid,
                 )
                 hot.add(page.page_id)
                 added += 1
@@ -153,7 +155,7 @@ class PagerService:
                     page = self.mmu.upsert(f"（长期记忆）{mem.text}", source=f"mem:{mem.id}",
                                            vec=self.encoder.encode_one(mem.text),
                                            importance=min(0.9, mem.importance),
-                                           tag="memory", segment=Segment.DATA)
+                                           tag="memory", segment=Segment.DATA, pid=pid)
                     hot.add(page.page_id)
                     added += 1
                 messages.append(f"图里没有，换入 {added} 条长期记忆")
@@ -164,14 +166,16 @@ class PagerService:
     def finish_turn(self, pid: int, user: str, answer: str) -> dict:
         self.dialogue.add("assistant", answer)
         self.mmu.add(f"A-OS：{answer}", segment=Segment.DAG_STATE, pinned=True,
-                     tag="answer", importance=0.7, source=f"turn:{pid}")
-        self.mmu.compact(tag="turn", keep=2)
+                     tag="answer", importance=0.7, source=f"turn:{pid}", pid=pid)
+        self.mmu.compact(tag="turn", keep=2, pid=pid)
         if user:
             self.memory.add(user, kind="episode", importance=0.4, source="chat")
         return {"pages": self.mmu.stats(), "graph": self.graph.stats()}
 
-    def _roll_pages(self) -> None:
+    def _roll_pages(self, pid: int) -> None:
         for page in list(self.mmu._pages.values()):
+            if page.pid != pid:
+                continue
             if page.segment is Segment.HUMAN and page.tag == "turn":
                 page.segment = Segment.DAG_STATE
                 page.pinned = True
@@ -179,7 +183,8 @@ class PagerService:
 
         recent = sorted(
             (p for p in self.mmu._pages.values()
-             if p.segment is Segment.DAG_STATE and p.state.value == "active"),
+             if p.pid == pid and p.segment is Segment.DAG_STATE
+             and p.state.value == "active"),
             key=lambda p: p.page_id,
         )
         for page in recent[:-6]:
@@ -195,7 +200,7 @@ class PagerService:
             page.pinned = False
             total -= page.tokens
             self.mmu._persist(page)
-        self.mmu.compact(tag="turn", keep=2)
+        self.mmu.compact(tag="turn", keep=2, pid=pid)
 
     async def close(self) -> None:
         self.mmu.close()

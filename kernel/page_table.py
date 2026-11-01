@@ -50,6 +50,7 @@ class Page:
     source: str = ""
     stale: bool = False
     segment: Segment = Segment.DATA
+    pid: int = 0
 
     def __post_init__(self) -> None:
         if not self.tokens:
@@ -91,7 +92,8 @@ class PageTable:
                 tokens      INTEGER NOT NULL DEFAULT 0,
                 source      TEXT NOT NULL DEFAULT '',
                 stale       INTEGER NOT NULL DEFAULT 0,
-                segment     TEXT NOT NULL DEFAULT 'data'
+                segment     TEXT NOT NULL DEFAULT 'data',
+                pid         INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -103,7 +105,8 @@ class PageTable:
         cols = {row[1] for row in self._conn.execute("PRAGMA table_info(pages)")}
         for name, decl in (("source", "TEXT NOT NULL DEFAULT ''"),
                            ("stale", "INTEGER NOT NULL DEFAULT 0"),
-                           ("segment", "TEXT NOT NULL DEFAULT 'data'")):
+                           ("segment", "TEXT NOT NULL DEFAULT 'data'"),
+                           ("pid", "INTEGER NOT NULL DEFAULT 0")):
             if name not in cols:
                 self._conn.execute(f"ALTER TABLE pages ADD COLUMN {name} {decl}")
         self._conn.commit()
@@ -113,7 +116,7 @@ class PageTable:
     def _load(self) -> None:
         rows = self._conn.execute(
             "SELECT page_id, content, state, pinned, importance, refs, created_at,"
-            " last_used, vec, tag, tokens, source, stale, segment FROM pages"
+            " last_used, vec, tag, tokens, source, stale, segment, pid FROM pages"
         ).fetchall()
         for r in rows:
             page = Page(
@@ -121,26 +124,28 @@ class PageTable:
                 importance=r[4], refs=r[5], created_at=r[6], last_used=r[7],
                 vec=json.loads(r[8]) if r[8] else None, tag=r[9],
                 tokens=r[10] or estimate_tokens(r[1]), source=r[11],
-                stale=bool(r[12]), segment=Segment(r[13]),
+                stale=bool(r[12]), segment=Segment(r[13]), pid=r[14],
             )
             self._pages[page.page_id] = page
 
     def _persist(self, page: Page) -> None:
         self._conn.execute(
             "INSERT INTO pages (page_id, content, state, pinned, importance, refs,"
-            " created_at, last_used, vec, tag, tokens, source, stale, segment)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " created_at, last_used, vec, tag, tokens, source, stale, segment, pid)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(page_id) DO UPDATE SET content=excluded.content,"
             " state=excluded.state, pinned=excluded.pinned,"
             " importance=excluded.importance, refs=excluded.refs,"
             " last_used=excluded.last_used, vec=excluded.vec,"
             " tag=excluded.tag, tokens=excluded.tokens,"
-            " source=excluded.source, stale=excluded.stale, segment=excluded.segment",
+            " source=excluded.source, stale=excluded.stale, segment=excluded.segment,"
+            " pid=excluded.pid",
             (
                 page.page_id, page.content, page.state.value, int(page.pinned),
                 page.importance, page.refs, page.created_at, page.last_used,
                 json.dumps([float(x) for x in page.vec]) if page.vec else None,
                 page.tag, page.tokens, page.source, int(page.stale), page.segment.value,
+                page.pid,
             ),
         )
         self._conn.commit()
@@ -149,7 +154,8 @@ class PageTable:
 
     def add(self, content: str, *, vec: Sequence[float] | None = None,
             importance: float = 0.0, tag: str = "", pinned: bool = False,
-            source: str = "", segment: Segment | str = Segment.DATA) -> Page:
+            source: str = "", segment: Segment | str = Segment.DATA,
+            pid: int = 0) -> Page:
         seg = Segment(segment) if isinstance(segment, str) else segment
         if seg in (Segment.SYSTEM, Segment.HUMAN, Segment.DAG_STATE):
             pinned = True
@@ -157,32 +163,33 @@ class PageTable:
             page_id=0, content=content or "（空）", pinned=pinned,
             importance=importance,
             vec=[float(x) for x in vec] if vec is not None and len(vec) else None,
-            tag=tag, source=source, segment=seg,
+            tag=tag, source=source, segment=seg, pid=pid,
         )
         cur = self._conn.execute(
             "INSERT INTO pages (content, state, pinned, importance, refs, created_at,"
-            " last_used, vec, tag, tokens, source, stale, segment)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " last_used, vec, tag, tokens, source, stale, segment, pid)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (page.content, page.state.value, int(page.pinned), page.importance, 0,
              page.created_at, page.last_used,
              json.dumps([float(x) for x in page.vec]) if page.vec else None,
-             page.tag, page.tokens, page.source, 0, page.segment.value),
+             page.tag, page.tokens, page.source, 0, page.segment.value, page.pid),
         )
         self._conn.commit()
         page.page_id = int(cur.lastrowid)
         self._pages[page.page_id] = page
-        self._enforce_data_cap()
+        self._enforce_data_cap(pid=pid)
         return page
 
     def upsert(self, content: str, *, source: str, vec: Sequence[float] | None = None,
-               importance: float = 0.6, tag: str = "", segment: Segment | str = Segment.DATA) -> Page:
-        """按 source 去重：同一份记忆/文件只保留一页。"""
+               importance: float = 0.6, tag: str = "", segment: Segment | str = Segment.DATA,
+               pid: int = 0) -> Page:
+        """按 (pid, source) 去重：同一进程的同一份记忆/文件只保留一页。"""
 
-        page = self.find_by_source(source)
+        page = self.find_by_source(source, pid=pid)
         seg = Segment(segment) if isinstance(segment, str) else segment
         if page is None:
             return self.add(content, vec=vec, importance=importance, tag=tag,
-                            source=source, segment=seg)
+                            source=source, segment=seg, pid=pid)
         changed = page.content != content
         if changed:
             page.set_content(content, vec)
@@ -198,8 +205,11 @@ class PageTable:
         self._persist(page)
         return page
 
-    def find_by_source(self, source: str, *, include_stale: bool = False) -> Page | None:
+    def find_by_source(self, source: str, *, include_stale: bool = False,
+                       pid: int | None = None) -> Page | None:
         for page in self._pages.values():
+            if pid is not None and page.pid != pid:
+                continue
             if page.source == source and (include_stale or not page.stale):
                 return page
         return None
@@ -241,12 +251,14 @@ class PageTable:
         page.last_used = time.time()
         self._persist(page)
 
-    def compact(self, *, tag: str = "turn", keep: int = 2) -> Page | None:
+    def compact(self, *, tag: str = "turn", keep: int = 2,
+                pid: int | None = None) -> Page | None:
         """把同标签的旧页压成一句摘要，只留最近 keep 个。"""
 
         targets = [p for p in self._pages.values()
                    if p.tag == tag and p.segment is Segment.DATA
-                   and p.state is PageState.ACTIVE]
+                   and p.state is PageState.ACTIVE
+                   and (pid is None or p.pid == pid)]
         if len(targets) <= keep:
             return None
         targets.sort(key=lambda p: p.page_id)
@@ -257,7 +269,7 @@ class PageTable:
             page.stale = True
             self._persist(page)
         return self.add(f"（早期对话摘要）{text[:220]}", importance=0.45,
-                        tag="summary", segment=Segment.DATA)
+                        tag="summary", segment=Segment.DATA, pid=pid or 0)
 
     def invalidate_source(self, source: str) -> int:
         count = 0
@@ -287,14 +299,16 @@ class PageTable:
                 count += 1
         return count
 
-    def _enforce_data_cap(self, *, keep: set[int] | None = None, budget: int | None = None) -> list[int]:
+    def _enforce_data_cap(self, *, keep: set[int] | None = None, budget: int | None = None,
+                          pid: int | None = None) -> list[int]:
         """DATA 段超上限时，从最久没用的换出；保留本轮选中的页。"""
 
         keep = keep or set()
         cap_tokens = max(1800, int((budget or 6000) * 0.55))
         active = [p for p in self._pages.values()
                   if p.segment is Segment.DATA and p.state is PageState.ACTIVE
-                  and not p.pinned and p.page_id not in keep]
+                  and not p.pinned and p.page_id not in keep
+                  and (pid is None or p.pid == pid)]
         total = sum(p.tokens for p in active)
         evicted: list[int] = []
         for page in sorted(active, key=lambda p: p.last_used):
@@ -337,7 +351,7 @@ class PageTable:
                 query_text: str = "", budget_tokens: int = 8000,
                 segments: dict[str, str] | None = None,
                 must_include: set[int] | None = None,
-                max_data: int = 6) -> tuple[str, list[int]]:
+                max_data: int = 6, pid: int | None = None) -> tuple[str, list[int]]:
         """固定段在前，最近状态常驻，DATA 段按相关度取 Top-K，总预算硬约束。"""
 
         segments = segments or {}
@@ -349,7 +363,8 @@ class PageTable:
         resident = sorted(
             (p for p in self._pages.values()
              if p.state is PageState.ACTIVE
-             and p.segment in (Segment.SYSTEM, Segment.HUMAN, Segment.DAG_STATE)),
+             and p.segment in (Segment.SYSTEM, Segment.HUMAN, Segment.DAG_STATE)
+             and (pid is None or p.segment is Segment.SYSTEM or p.pid == pid)),
             key=lambda p: p.page_id,
         )
         used += sum(p.tokens for p in resident)
@@ -358,6 +373,8 @@ class PageTable:
         cands: list[tuple[float, float, float, Page]] = []
         for page in self._pages.values():
             if page.segment is not Segment.DATA or page.stale or page.pinned:
+                continue
+            if pid is not None and page.pid != pid:
                 continue
             sim = _cosine(query_vec, page.vec) if (query_vec and page.vec) else 0.0
             lex = _lexical(query_text, page.content) if query_text else 0.0
@@ -394,7 +411,7 @@ class PageTable:
             page.last_used = time.time()
             page.refs += 1
             self._persist(page)
-        self._enforce_data_cap(keep=chosen_ids, budget=budget)
+        self._enforce_data_cap(keep=chosen_ids, budget=budget, pid=pid)
 
         parts: list[str] = []
         titles = {"system": "系统段", "human": "人类指令段", "dag": "状态段"}
@@ -416,19 +433,22 @@ class PageTable:
 
     # ---------- 观察 ----------
 
-    def stats(self) -> dict:
-        active = [p for p in self._pages.values() if p.state is PageState.ACTIVE]
+    def stats(self, *, pid: int | None = None) -> dict:
+        pool = [p for p in self._pages.values()
+                if pid is None or p.pid == pid or p.segment is Segment.SYSTEM]
+        active = [p for p in pool if p.state is PageState.ACTIVE]
         seg = {s.value: 0 for s in Segment}
         for page in active:
             seg[page.segment.value] += 1
         return {
-            "pages": len(self._pages),
+            "pages": len(pool),
             "active": len(active),
-            "swapped": len(self._pages) - len(active),
+            "swapped": len(pool) - len(active),
             "active_tokens": sum(p.tokens for p in active),
             "segments": seg,
-            "faults": sum(1 for p in self._pages.values() if p.tag == "fault"),
-            "memories": sum(1 for p in self._pages.values() if p.tag == "memory"),
+            "faults": sum(1 for p in pool if p.tag in ("fault", "graph")),
+            "memories": sum(1 for p in pool if p.tag == "memory"),
+            "pids": len({p.pid for p in pool}),
         }
 
     def close(self) -> None:

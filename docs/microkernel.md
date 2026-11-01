@@ -4,7 +4,7 @@
 
 当前状态：**进程、IPC、缺页陷阱、段页式 pager、长期记忆/画像、VFS 工具、DMA、spool、Web/CLI 已接通。**
 
-还差：服务拆独立进程、per-process 页表、文件块缺页、切生产 8799。
+还差：服务拆独立进程、文件块缺页、切生产 8799。
 
 ## 结构
 
@@ -97,6 +97,22 @@ mk.ask("继续搞登录页")
 
 图节点页内容 = `GraphStore.render(node)`（summary + lessons + artifact + 子节点），不是整份文件。
 
+## per-process 页表
+
+页表按 pid 隔离：
+
+```
+PageTable（全局页帧）
+  pages[].pid = 0   → SYSTEM 共享
+  pages[].pid = N   → 进程 N 的 HUMAN / DAG_STATE / DATA
+```
+
+- `begin_turn(pid)`、`fault(pid)`、`compose(pid)`、`finish_turn(pid)`、`compact(pid)` 全部带 pid；
+- `compose(pid)` 只渲染 `SYSTEM + pid 自己的 HUMAN/DAG/DATA`；
+- `_enforce_data_cap(pid)` 只淘汰本进程的 DATA；
+- 同一图节点被两个进程缺页，会各有一份 DATA 页（帧暂不共享）；
+- 并发 `ask()` 不再加锁；两个进程同时对话，HUMAN 页不会串。
+
 ## 服务边界
 
 | 服务 | 职责 | 在缺页路径 |
@@ -134,7 +150,7 @@ python3 -m unittest tests.test_microkernel -v
 python3 tests/mk_demo.py
 ```
 
-13 个微内核用例：
+14 个微内核用例：
 
 - 启动/服务注册/内核 state
 - 未知服务
@@ -149,18 +165,18 @@ python3 tests/mk_demo.py
 - DMA 把文件搬进缓存/索引
 - Web 路由走微内核
 - 按 pid 状态树隔离
+- 并发两个 ask：各自的 HUMAN 页不串、各带一份 SYSTEM
 
 全量：
 
 ```
-Ran 38 tests in 6.7s
+Ran 39 tests in 8.7s
 OK
 ```
 
 ## 还没做
 
 1. pager / librarian / vfs 拆独立进程，消息总线换 Unix socket。
-2. per-process 页表（现在还是全局工作集，用户回合串行化）。
-3. 文件块缺页：图里没有时走 VFS 语义索引，而不是只查长期记忆。
-4. 谱坐标定期重算、图上限触发的在线合并。
-5. 切生产 8799（先影子跑、再换 systemd ExecStart）。
+2. 文件块缺页：图里没有时走 VFS 语义索引，而不是只查长期记忆。
+3. 谱坐标定期重算、图上限触发的在线合并。
+4. 切生产 8799（先影子跑、再换 systemd ExecStart）。

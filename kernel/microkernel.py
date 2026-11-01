@@ -49,7 +49,6 @@ class Microkernel:
         self.spool = Spool(self.home)
         self._last: dict = {}
         self._last_pid: int | None = None
-        self._ask_lock = asyncio.Lock()
         self.dag = StateDAG(self.home / "dag.db")
         self.journal = Journal(self.home / "tasks.db")
         self.budget = int(os.environ.get("AOS_CTX_BUDGET", "8000"))
@@ -130,10 +129,8 @@ class Microkernel:
             return await AgentProcess(mk).run(proc)
 
         started = time.time()
-        # phase 3：页表还是全局工作集，先串行化用户回合；per-process 页表后再放开
-        async with self._ask_lock:
-            proc = await self.spawn("chat", routine, payload={"text": text, "channel": channel})
-            answer = await self.wait(proc.pid, timeout=timeout)
+        proc = await self.spawn("chat", routine, payload={"text": text, "channel": channel})
+        answer = await self.wait(proc.pid, timeout=timeout)
         self.spool.output(pid=proc.pid, channel=channel, text=answer)
         self._last_pid = proc.pid
         self._last = {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import unittest
 from pathlib import Path
@@ -221,6 +222,32 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("kernel", dbg)
         finally:
             await client.close()
+
+    async def test_concurrent_asks_have_isolated_segments(self) -> None:
+        echo = EchoModel()
+        self.mk.model = echo
+        self.mk.librarian.model = echo
+        answers = await asyncio.gather(
+            self.mk.ask("进程A的消息"),
+            self.mk.ask("进程B的消息"),
+        )
+        self.assertEqual(answers, ["看到图里的内容了。", "看到图里的内容了。"])
+        procs = sorted(self.mk.table._procs.values(), key=lambda p: p.pid)
+        self.assertEqual(len(procs), 2)
+        a, b = procs
+        pages_a = [p for p in self.mk.pager.mmu._pages.values()
+                   if p.pid == a.pid and p.segment.value == "human"]
+        pages_b = [p for p in self.mk.pager.mmu._pages.values()
+                   if p.pid == b.pid and p.segment.value == "human"]
+        self.assertEqual(len(pages_a), 1)
+        self.assertEqual(len(pages_b), 1)
+        self.assertIn("进程A", pages_a[0].content)
+        self.assertNotIn("进程B", pages_a[0].content)
+        self.assertIn("进程B", pages_b[0].content)
+        for proc in (a, b):
+            stats = self.mk.pager.mmu.stats(pid=proc.pid)
+            self.assertEqual(stats["segments"]["human"], 1, stats)
+            self.assertEqual(stats["segments"]["system"], 1, stats)
 
     async def test_bus_counts(self) -> None:
         await self.mk.bus.call("kernel", "ping")
