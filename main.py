@@ -343,10 +343,11 @@ class AOS:
         nodes = sorted(self.dag._nodes.values(), key=lambda n: n.node_id)[-40:]
         pages = sorted(self.mmu._pages.values(), key=lambda p: p.page_id)[-30:]
         return {
-            "dag": [{"id": n.node_id, "kind": n.kind, "status": n.status.value,
-                     "text": n.content[:80]} for n in nodes],
+            "dag": [{"id": n.node_id, "pid": n.parent_id, "kind": n.kind,
+                     "status": n.status.value, "text": n.content[:80]} for n in nodes],
             "pages": [{"id": p.page_id, "preview": p.content[:60].replace("\n", " "),
-                       "source": p.source, "stale": p.stale, "pinned": p.pinned}
+                       "source": p.source, "stale": p.stale, "pinned": p.pinned,
+                       "state": p.state.value}
                       for p in pages],
             "log": self.log[-120:],
             "tokens": self.kernel.usage.total,

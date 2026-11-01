@@ -62,6 +62,17 @@
   .body::-webkit-scrollbar { width: 6px; }
   .body::-webkit-scrollbar-thumb { background: #222; border-radius: 3px; }
 
+  #graph { display: block; min-width: 100%; }
+  #graph .edge { stroke: #23302c; stroke-width: 1; fill: none; }
+  #graph .box { fill: #0b1210; stroke: #1f2a26; }
+  #graph .box.active { stroke: var(--cyan); filter: drop-shadow(0 0 4px rgba(0,255,255,.45)); }
+  #graph .box.success { stroke: var(--green); }
+  #graph .box.doc { stroke: var(--amber); }
+  #graph .box.failed, #graph .box.archived { stroke: #5a1620; }
+  #graph text { font: 10px var(--mono); fill: #9aa5a1; }
+  #graph text.id { fill: #445; }
+  #graph .empty { fill: var(--dim); font-size: 11px; }
+
   .node {
     position: relative; padding: 3px 0 3px 12px; margin: 2px 0;
     font-size: 12px; color: var(--fg); border-left: 2px solid #1f1f1f;
@@ -156,7 +167,7 @@
 <main>
   <section class="pane" data-pane="dag">
     <div class="head">状态树</div>
-    <div class="body" id="dag"></div>
+    <div class="body" id="dag"><svg id="graph"></svg></div>
   </section>
   <section class="pane on" data-pane="term">
     <div class="head">终端</div>
@@ -206,6 +217,82 @@ function connect() {
   };
 }
 
+const SVGNS = 'http://www.w3.org/2000/svg';
+const NW = 150, NH = 22, GX = 14, GY = 34;
+
+function drawGraph(nodes) {
+  const svg = $('graph');
+  if (!svg) return;
+  svg.innerHTML = '';
+  if (!nodes.length) {
+    const t = document.createElementNS(SVGNS, 'text');
+    t.setAttribute('class', 'empty'); t.setAttribute('x', 8); t.setAttribute('y', 18);
+    t.textContent = '（还没有节点）';
+    svg.appendChild(t);
+    return;
+  }
+
+  const byId = new Map(nodes.map(n => [n.id, n]));
+  const depthOf = (n) => {
+    let d = 0, cur = n, guard = 0;
+    while (cur && cur.pid != null && byId.has(cur.pid) && guard++ < 50) {
+      cur = byId.get(cur.pid); d++;
+    }
+    return d;
+  };
+  const cols = new Map();
+  nodes.forEach(n => {
+    const d = depthOf(n);
+    if (!cols.has(d)) cols.set(d, []);
+    cols.get(d).push(n);
+  });
+
+  const pos = new Map();
+  let maxX = 0, maxY = 0;
+  [...cols.keys()].sort((a, b) => a - b).forEach(d => {
+    cols.get(d).forEach((n, i) => {
+      const x = 12 + i * (NW + GX), y = 12 + d * GY;
+      pos.set(n.id, { x, y });
+      maxX = Math.max(maxX, x + NW);
+      maxY = Math.max(maxY, y + NH);
+    });
+  });
+
+  // 连线
+  nodes.forEach(n => {
+    const a = pos.get(n.id), b = n.pid != null ? pos.get(n.pid) : null;
+    if (!a || !b) return;
+    const path = document.createElementNS(SVGNS, 'path');
+    const x1 = b.x + NW / 2, y1 = b.y + NH, x2 = a.x + NW / 2, y2 = a.y;
+    const my = (y1 + y2) / 2;
+    path.setAttribute('d', `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`);
+    path.setAttribute('class', 'edge');
+    svg.appendChild(path);
+  });
+
+  // 节点
+  nodes.forEach(n => {
+    const p = pos.get(n.id);
+    const g = document.createElementNS(SVGNS, 'g');
+    const rect = document.createElementNS(SVGNS, 'rect');
+    rect.setAttribute('x', p.x); rect.setAttribute('y', p.y);
+    rect.setAttribute('width', NW); rect.setAttribute('height', NH);
+    rect.setAttribute('rx', 3);
+    rect.setAttribute('class', 'box ' + n.status + ' ' + n.kind);
+    const label = document.createElementNS(SVGNS, 'text');
+    label.setAttribute('x', p.x + 6); label.setAttribute('y', p.y + 15);
+    const short = (n.text || '').slice(0, 16);
+    label.textContent = `#${n.id} ${short}`;
+    const idt = document.createElementNS(SVGNS, 'text');
+    idt.setAttribute('class', 'id');
+    g.appendChild(rect); g.appendChild(label);
+    svg.appendChild(g);
+  });
+
+  svg.setAttribute('width', maxX + 12);
+  svg.setAttribute('height', maxY + 12);
+}
+
 function esc(s) {
   return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
 }
@@ -217,13 +304,10 @@ function render(s) {
   stat.run.textContent = s.running || 0;
   if (stat.workers) stat.workers.textContent = s.workers || 0;
 
-  el.dag.innerHTML = (s.dag || []).map(n =>
-    `<div class="node ${esc(n.status)} ${esc(n.kind)}">` +
-    `<span class="id">#${n.id}</span><span class="kind">${esc(n.kind)}</span>` +
-    `${esc(n.text)}</div>`).join('');
+  drawGraph(s.dag || []);
 
   el.pages.innerHTML = (s.pages || []).map(p =>
-    `<div class="pg ${p.stale ? 'stale' : 'on'}">` +
+    `<div class="pg ${(p.stale || p.state === 'swapped_out') ? 'stale' : 'on'}">` +
     `<div class="top"><span class="num">#${p.id}</span>` +
     `${p.source ? `<span class="src">${esc(p.source)}</span>` : ''}` +
     `${p.pinned ? '<span class="pin">PIN</span>' : ''}</div>` +
@@ -272,6 +356,14 @@ if (window.visualViewport) {
   const vv = window.visualViewport;
   vv.addEventListener('resize', () => { document.body.style.height = vv.height + 'px'; });
 }
+
+// 支持 ?tab=dag|pages|term 深链
+(function initTab() {
+  const want = new URLSearchParams(location.search).get('tab');
+  if (!want) return;
+  const btn = document.querySelector(`nav.tabs button[data-tab="${want}"]`);
+  if (btn) btn.click();
+})();
 
 connect();
 </script>

@@ -82,6 +82,7 @@ class PageTable:
         )
         self._conn.commit()
         self._load()
+        self._enforce_capacity()
 
     # ---------- 持久化 ----------
 
