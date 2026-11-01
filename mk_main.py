@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import signal
 import sys
 from pathlib import Path
 
@@ -73,7 +74,22 @@ async def amain() -> None:
             for i, arg in enumerate(sys.argv):
                 if arg == "--port" and i + 1 < len(sys.argv):
                     port = int(sys.argv[i + 1])
-            await serve(mk, "0.0.0.0", port)
+            serve_task = asyncio.create_task(serve(mk, "0.0.0.0", port))
+            stop = asyncio.Event()
+            stop_task = asyncio.create_task(stop.wait())
+            loop = asyncio.get_running_loop()
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                try:
+                    loop.add_signal_handler(sig, stop.set)
+                except NotImplementedError:
+                    pass
+            done, _ = await asyncio.wait([serve_task, stop_task],
+                                         return_when=asyncio.FIRST_COMPLETED)
+            if serve_task in done:
+                await serve_task
+            serve_task.cancel()
+            stop_task.cancel()
+            await asyncio.gather(serve_task, stop_task, return_exceptions=True)
         else:
             await run_cli(mk)
     finally:

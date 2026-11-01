@@ -119,6 +119,11 @@ class Microkernel:
         self.bus = RemoteBus(self.handle)
         for name, client in self._clients.items():
             self.bus.register(name, client)
+        try:
+            self._pager_stats = await self.bus.call("pager", "stats", timeout=10)
+            self._history_cache = await self.bus.call("pager", "history", limit=200)
+        except Exception:
+            pass
 
     async def close(self) -> None:
         self._state = "stopping"
@@ -231,7 +236,7 @@ class Microkernel:
     @property
     def memory(self):
         if self.split:
-            return _NullMemory()
+            return _CachedMemory(self)
         return self.pager.memory
 
     def history(self, limit: int = 100) -> list[dict]:
@@ -384,6 +389,9 @@ class Microkernel:
         }
 
 
-class _NullMemory:
+class _CachedMemory:
+    def __init__(self, kernel) -> None:
+        self.kernel = kernel
+
     def stats(self) -> dict:
-        return {"total": 0, "by_kind": {}}
+        return self.kernel._pager_stats.get("memory", {"total": 0, "by_kind": {}})

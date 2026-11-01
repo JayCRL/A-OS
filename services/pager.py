@@ -35,6 +35,13 @@ class PagerService:
         self.consolidator: Consolidator | None = None
 
     async def boot(self) -> None:
+        # 旧版页表里 pid=0 的 HUMAN/DAG/DATA 是历史遗留，不再参与新进程地址空间
+        for page in list(self.mmu._pages.values()):
+            if page.pid == 0 and page.segment is not Segment.SYSTEM and page.state.value == "active":
+                page.pinned = False
+                page.state = page.state.__class__.SWAPPED
+                self.mmu._persist(page)
+        self._reap_old_pids(0, keep=0)
         self.mmu.upsert(persona.system_prompt(), source="sys:persona",
                         vec=self.encoder.encode_one(persona.system_prompt()),
                         importance=1.0, tag="system", segment=Segment.SYSTEM)
@@ -106,6 +113,7 @@ class PagerService:
 
     def begin_turn(self, pid: int, text: str) -> dict:
         text = (text or "").strip()
+        self._reap_old_pids(pid, keep=2)
         self.dialogue.add("user", text)
         self._roll_pages(pid)
         shown = text if len(text) <= 4000 else text[:4000] + "…（已截断）"
@@ -226,6 +234,19 @@ class PagerService:
         if user:
             self.memory.add(user, kind="episode", importance=0.4, source="chat")
         return {"pages": self.mmu.stats(), "graph": self.graph.stats()}
+
+    def _reap_old_pids(self, current: int, *, keep: int = 2) -> None:
+        """进程退出后，旧 pid 的工作集降温；只保留最近 keep 个进程活跃。"""
+
+        pids = sorted({p.pid for p in self.mmu._pages.values()
+                       if p.pid not in (0, current) and p.state.value == "active"})
+        targets = pids[:-keep] if keep > 0 else pids
+        for old in targets:
+            for page in self.mmu._pages.values():
+                if page.pid == old and page.state.value == "active":
+                    page.pinned = False
+                    page.state = page.state.__class__.SWAPPED
+                    self.mmu._persist(page)
 
     def _roll_pages(self, pid: int) -> None:
         for page in list(self.mmu._pages.values()):
