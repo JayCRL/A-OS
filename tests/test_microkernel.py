@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -199,6 +200,26 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("第二句话", first)
         self.assertIn("第二句话", second)
 
+    async def test_file_block_fault_when_graph_empty(self) -> None:
+        (self.home / "workspace").mkdir(parents=True, exist_ok=True)
+        (self.home / "workspace" / "auth.md").write_text(
+            "登录接口要保证幂等：重复提交只处理一次，使用请求号去重。\n",
+            encoding="utf-8",
+        )
+        await self.mk.bus.call("vfs", "dma_scan")
+        model = ScriptModel([
+            "<|PAGE_FAULT: 登录接口 幂等|>",
+            "登录接口用请求号去重来保证幂等。",
+        ])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        answer = await self.mk.ask("登录接口怎么保证幂等")
+        self.assertIn("幂等", answer)
+        pages = [p for p in self.mk.pager.mmu._pages.values() if p.tag == "file"]
+        self.assertTrue(pages, "图里没有时应换入 VFS 文件块")
+        self.assertTrue(any(p.source.startswith("file:") for p in pages))
+        self.assertGreaterEqual((await self.mk.bus.call("pager", "stats"))["faults"], 1)
+
     async def test_web_routes_use_microkernel(self) -> None:
         from aiohttp.test_utils import TestClient, TestServer
         from web.server import make_app
@@ -265,6 +286,49 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
             await self.mk.wait(proc.pid)
         self.assertEqual(proc.state, ProcState.KILLED)
         self.assertIn("boom", proc.error or "")
+
+
+class SplitServiceTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.home = Path(self.tmp.name) / "home"
+        self._old = {k: os.environ.get(k) for k in ("AOS_MODEL", "AOS_ENCODER")}
+        os.environ["AOS_MODEL"] = "offline"
+        os.environ["AOS_ENCODER"] = "hash"
+        self.mk = Microkernel(self.home, split=True)
+        await self.mk.boot()
+
+    async def asyncTearDown(self) -> None:
+        await self.mk.close()
+        for key, value in self._old.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        self.tmp.cleanup()
+
+    async def test_services_are_separate_processes(self) -> None:
+        self.assertEqual(self.mk.bus.endpoints(), ["kernel", "librarian", "pager", "vfs"])
+        self.assertEqual(len(self.mk._workers), 3)
+        self.assertTrue(all(p.returncode is None for p in self.mk._workers))
+        self.assertEqual(await self.mk.bus.call("vfs", "ping"), "pong")
+        self.assertEqual(await self.mk.bus.call("pager", "ping"), "pong")
+        self.assertEqual((await self.mk.bus.call("librarian", "stats"))["processed"], 0)
+
+    async def test_remote_pager_librarian_vfs_flow(self) -> None:
+        await self.mk.bus.call(
+            "librarian", "observe",
+            module="登录页", task="修复越权", success=True,
+            artifact="auth.patch", lesson="方案C有效", text="完成",
+        )
+        await self.mk.bus.call("librarian", "flush")
+        stats = await self.mk.bus.call("pager", "stats")
+        self.assertEqual(stats["graph"]["by_type"].get("task"), 1, stats)
+        answer = await self.mk.ask("继续搞登录页")
+        self.assertIn("模型", answer)
+        hist = self.mk.history()
+        self.assertEqual(len(hist), 2)
+        self.assertGreater(len(self.mk.debug_snapshot()["services"]), 0)
 
 
 if __name__ == "__main__":

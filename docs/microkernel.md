@@ -1,10 +1,10 @@
-# 微内核：phase 1 + 2 + 3
+# 微内核：phase 1 ~ 5
 
 目标：内核常驻，服务常驻，用户输入创建进程；pager / librarian 在内核外。
 
-当前状态：**进程、IPC、缺页陷阱、段页式 pager、长期记忆/画像、VFS 工具、DMA、spool、Web/CLI 已接通。**
+当前状态：**进程、IPC、缺页陷阱、per-process 段页、VFS/DMA/spool、Web/CLI、服务拆独立进程与 Unix socket 已接通。**
 
-还差：服务拆独立进程、文件块缺页、切生产 8799。
+还差：切生产 8799、服务崩溃重启、图在线合并。
 
 ## 结构
 
@@ -17,7 +17,7 @@ Microkernel
  ├─ Journal           任务租约/断点
  │
  ├─ pager 服务        PageTable + MemoryStore + Dialogue + GraphStore + GraphRetriever
- ├─ librarian 服务    LLMExtractor + Consolidator（后台写图）
+ ├─ librarian 服务    LLMExtractor（split 时只抽取，写图交给 pager）
  ├─ vfs 服务          文件 / 网页 / DMA 批量搬运
  ├─ spool             inbox.jsonl / outbox.jsonl
  └─ agent_proc        进程 → compose / fault / tool / state / journal → 模型
@@ -97,6 +97,36 @@ mk.ask("继续搞登录页")
 
 图节点页内容 = `GraphStore.render(node)`（summary + lessons + artifact + 子节点），不是整份文件。
 
+## 文件块缺页
+
+图里没有（或只有 project 骨架）时，pager 依次回退：
+
+```
+GraphRetriever 图节点
+  → vfs.semantic（chunks.db 文件块向量索引）
+  → 长期记忆
+```
+
+文件块页 `source=file:<path>:<offset>`，tag=file，仍然走同一个 DATA 段和预算。
+
+## 独立服务进程
+
+`mk_main.py --split`：
+
+```
+kernel 进程
+ ├─ vfs    独立进程  → home/ipc/vfs.sock
+ ├─ pager  独立进程  → home/ipc/pager.sock
+ └─ librarian 独立进程 → home/ipc/librarian.sock
+```
+
+- 传输：Unix socket，一行一个 JSON 请求/响应；
+- pager 通过 UnixClient 调 vfs 做文件块缺页；
+- librarian 只跑 LLMExtractor，把 Episode 通过 `pager.commit_episode` 写图；
+- 服务启动顺序 vfs → pager → librarian；
+- 服务日志在 `home/logs/worker-*.log`；
+- 关闭时 SIGTERM，等 5 秒再 kill。
+
 ## per-process 页表
 
 页表按 pid 隔离：
@@ -150,7 +180,7 @@ python3 -m unittest tests.test_microkernel -v
 python3 tests/mk_demo.py
 ```
 
-14 个微内核用例：
+17 个微内核用例：
 
 - 启动/服务注册/内核 state
 - 未知服务
@@ -166,17 +196,19 @@ python3 tests/mk_demo.py
 - Web 路由走微内核
 - 按 pid 状态树隔离
 - 并发两个 ask：各自的 HUMAN 页不串、各带一份 SYSTEM
+- 文件块缺页：图空时从 VFS 语义索引换入
+- split 模式：三个独立进程、远程 pager/librarian/vfs 流程
 
 全量：
 
 ```
-Ran 39 tests in 8.7s
+Ran 42 tests in 13.5s
 OK
 ```
 
 ## 还没做
 
-1. pager / librarian / vfs 拆独立进程，消息总线换 Unix socket。
-2. 文件块缺页：图里没有时走 VFS 语义索引，而不是只查长期记忆。
+1. 切生产 8799（先影子跑、再换 systemd ExecStart）。
+2. 服务崩溃重启/健康检查；现在只负责启动和 SIGTERM。
 3. 谱坐标定期重算、图上限触发的在线合并。
-4. 切生产 8799（先影子跑、再换 systemd ExecStart）。
+4. 三个服务各加载一份编码器，内存还要再压。

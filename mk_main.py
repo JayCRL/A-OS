@@ -45,9 +45,11 @@ async def run_cli(mk: Microkernel) -> None:
             snap = mk.debug_snapshot()
             print(f"内核：{snap['state']}  进程 {snap['process_stats']}")
             print(f"服务：{', '.join(snap['services'])}")
-            print(f"页表：{snap['pages']['active']} 活跃 / {snap['pages']['swapped']} 换出")
-            print(f"图：{snap['pager']['active']} 节点 / {snap['pager']['edges']} 边 / "
-                  f"{snap['pager']['trials']} 试错")
+            pages = snap.get("pages") or {}
+            graph = snap.get("pager") or {}
+            print(f"页表：{pages.get('active', 0)} 活跃 / {pages.get('swapped', 0)} 换出")
+            print(f"图：{graph.get('active', 0)} 节点 / {graph.get('edges', 0)} 边 / "
+                  f"{graph.get('trials', 0)} 试错")
             print(f"总线：{snap['bus']['sent']} 条")
             continue
         if text == "/memory":
@@ -62,7 +64,7 @@ async def run_cli(mk: Microkernel) -> None:
 
 
 async def amain() -> None:
-    mk = Microkernel(DATA)
+    mk = Microkernel(DATA, split="--split" in sys.argv)
     await mk.boot()
     try:
         if "--web" in sys.argv:

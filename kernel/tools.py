@@ -119,7 +119,7 @@ class Tools:
         return [
             {"source": f"file:{h.path}:{h.start}", "path": h.path,
              "text": h.text, "score": h.score}
-            for h in hits if h.score >= 0.48
+            for h in hits if h.score >= 0.30
         ]
 
     def _read(self, path: str) -> str:

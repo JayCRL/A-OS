@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from kernel import persona
+from kernel.consolidator import Consolidator, Episode
 from kernel.dialogue import Dialogue
 from kernel.graph import GraphStore
 from kernel.memory import MemoryStore
@@ -21,15 +22,17 @@ from kernel.retriever import GraphRetriever
 class PagerService:
     name = "pager"
 
-    def __init__(self, home: str | Path, encoder) -> None:
+    def __init__(self, home: str | Path, encoder, bus=None) -> None:
         self.home = Path(home)
         self.encoder = encoder
+        self.bus = bus
         self.graph = GraphStore(self.home / "graph.db", encoder)
         self.retriever = GraphRetriever(self.graph, encoder)
         self.mmu = PageTable(self.home / "pages.db", max_active=10)
         self.memory = MemoryStore(self.home / "brain.db", encoder)
         self.dialogue = Dialogue(self.home / "brain.db", session="main")
         self.faults = 0
+        self.consolidator: Consolidator | None = None
 
     async def boot(self) -> None:
         self.mmu.upsert(persona.system_prompt(), source="sys:persona",
@@ -51,8 +54,13 @@ class PagerService:
                 set(params.get("must_include") or []), int(params.get("budget", 8000)),
             )
         if method == "fault":
-            return self.fault(int(params["pid"]), list(params.get("targets") or []),
-                              set(params.get("hot") or []))
+            return await self.fault(int(params["pid"]), list(params.get("targets") or []),
+                                    set(params.get("hot") or []))
+        if method == "commit_episode":
+            return self.commit_episode(dict(params))
+        if method == "history":
+            return [{"role": t.role, "text": t.text, "ts": t.ts}
+                    for t in self.dialogue.history(limit=int(params.get("limit", 100)))]
         if method == "invalidate":
             n = self.mmu.invalidate_source(str(params.get("source", "")))
             return {"invalidated": n}
@@ -75,6 +83,26 @@ class PagerService:
         raise ValueError(f"pager 没有方法：{method}")
 
     # ---------- 一轮的页 ----------
+
+    def commit_episode(self, data: dict) -> dict:
+        if self.consolidator is None:
+            self.consolidator = Consolidator(self.graph)
+        episode = Episode(
+            text=str(data.get("text", "")),
+            module=str(data.get("module", "")),
+            task=str(data.get("task", "")),
+            success=bool(data.get("success", False)),
+            lesson=str(data.get("lesson", "")),
+            artifact=str(data.get("artifact", "")),
+            attempts=int(data.get("attempts", 0) or 0),
+            action=str(data.get("action", "")),
+            result=str(data.get("result", "")),
+            depends_on=list(data.get("depends_on") or []),
+        )
+        self.consolidator.ingest(episode)
+        if data.get("flush"):
+            self.consolidator.flush()
+        return self.graph.stats()
 
     def begin_turn(self, pid: int, text: str) -> dict:
         text = (text or "").strip()
@@ -125,8 +153,8 @@ class PagerService:
         )
         return {"prompt": prompt, "pages": ids, "budget": budget}
 
-    def fault(self, pid: int, targets: list[str], hot: set[int] | list[int]) -> dict:
-        """图优先：query → 3~5 个图节点 → DATA 页。"""
+    async def fault(self, pid: int, targets: list[str], hot: set[int] | list[int]) -> dict:
+        """图优先：图节点 → VFS 文件块 → 长期记忆，全部映射成 DATA 页。"""
 
         hot = set(hot or [])
         messages: list[str] = []
@@ -135,6 +163,9 @@ class PagerService:
             if not target:
                 continue
             nodes = self.retriever.retrieve(target, k=3)
+            # 只有 project 不算命中；否则会永远挡住 VFS/记忆回退
+            if not any(n.type != "project" for n in nodes):
+                nodes = []
             added = 0
             for node in nodes:
                 page = self.mmu.upsert(
@@ -149,6 +180,30 @@ class PagerService:
                 self.faults += added
                 messages.append(f"换入 {added} 个图节点（{target}）")
                 continue
+
+            file_hits = []
+            if self.bus is not None:
+                try:
+                    file_hits = await self.bus.call("vfs", "semantic", query=target, k=3)
+                except Exception:
+                    file_hits = []
+            for hit in file_hits[:2]:
+                if float(hit.get("score", 0.0)) < 0.30:
+                    continue
+                body = str(hit.get("text", ""))[:1800]
+                page = self.mmu.upsert(
+                    f"文件 {hit.get('path', '')}：\n{body}",
+                    source=str(hit.get("source", "")),
+                    vec=self.encoder.encode_one(body[:800]),
+                    importance=0.85, tag="file", segment=Segment.DATA, pid=pid,
+                )
+                hot.add(page.page_id)
+                added += 1
+                self.faults += 1
+                messages.append(f"图里没有，换入文件块 {hit.get('path', '')}（{hit.get('score', 0):.2f}）")
+            if added:
+                continue
+
             hits = self.memory.recall(target, k=2)
             if hits:
                 for _score, mem in hits:

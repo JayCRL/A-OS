@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -20,6 +21,7 @@ from kernel.kernel_scheduler import Job, KernelScheduler
 from kernel.process import ProcState, Process, ProcessTable
 from kernel.spool import Spool
 from kernel.state_dag import StateDAG
+from kernel.unix_ipc import RemoteBus, UnixClient
 from services.librarian import LibrarianService
 from services.pager import PagerService
 from services.vfs import VFSService
@@ -29,10 +31,11 @@ Routine = Callable[[Process, "Microkernel"], Awaitable[Any]]
 
 class Microkernel:
     def __init__(self, home: str | Path = "/opt/aos/data", *, model=None,
-                 encoder=None) -> None:
+                 encoder=None, split: bool = False) -> None:
         self.home = Path(home)
         self.home.mkdir(parents=True, exist_ok=True)
-        self.encoder = encoder or load_encoder()
+        self.split = split
+        self.encoder = encoder if split else (encoder or load_encoder())
         if model is not None:
             self.model = model
         elif os.environ.get("AOS_MODEL", "auto") == "offline":
@@ -40,13 +43,24 @@ class Microkernel:
         else:
             self.model = DeepSeekKernel() if DeepSeekKernel().ready else OfflineKernel()
 
-        self.bus = MessageBus()
         self.table = ProcessTable()
         self.sched = KernelScheduler(max_workers=3)
-        self.pager = PagerService(self.home, self.encoder)
-        self.librarian = LibrarianService(self.pager.graph, model=self.model)
-        self.vfs = VFSService(self.home, self.encoder)
         self.spool = Spool(self.home)
+        self._workers: list[asyncio.subprocess.Process] = []
+        self._clients: dict[str, UnixClient] = {}
+        self._history_cache: list[dict] = []
+        self._pager_stats: dict = {"pages": {}, "graph": {}, "memory": {}, "faults": 0}
+        self._log_handles: list = []
+        if split:
+            self.bus = None  # boot 时换成 RemoteBus
+            self.pager = None
+            self.librarian = None
+            self.vfs = None
+        else:
+            self.bus = MessageBus()
+            self.pager = PagerService(self.home, self.encoder, bus=None)
+            self.librarian = LibrarianService(self.pager.graph, model=self.model)
+            self.vfs = VFSService(self.home, self.encoder)
         self._last: dict = {}
         self._last_pid: int | None = None
         self.dag = StateDAG(self.home / "dag.db")
@@ -58,27 +72,90 @@ class Microkernel:
     # ---------- 启动 ----------
 
     async def boot(self) -> None:
+        if self.split:
+            await self._boot_split()
+            await self.sched.start()
+            self._state = "running"
+            return
         self.bus.register("kernel", self)
         self.bus.register("pager", self.pager)
         self.bus.register("librarian", self.librarian)
         self.bus.register("vfs", self.vfs)
         await self.bus.start()
+        self.pager.bus = self.bus
         await self.pager.boot()
         await self.librarian.start()
         await self.vfs.boot()
         await self.sched.start()
         self._state = "running"
 
+    async def _boot_split(self) -> None:
+        ipc = self.home / "ipc"
+        ipc.mkdir(parents=True, exist_ok=True)
+        root = Path(__file__).resolve().parent.parent
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(root)
+        socks = {name: str(ipc / f"{name}.sock") for name in ("vfs", "pager", "librarian")}
+
+        async def start_worker(name: str, extra: list[str]) -> None:
+            cmd = [sys.executable, "-m", "services.worker", name,
+                   "--home", str(self.home), "--sock", socks[name], *extra]
+            log_path = self.home / "logs" / f"worker-{name}.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            handle = log_path.open("ab")
+            self._log_handles.append(handle)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, cwd=str(root), env=env, stdout=handle, stderr=handle,
+            )
+            self._workers.append(proc)
+            client = UnixClient(socks[name])
+            await client.wait_ready(timeout=30)
+            self._clients[name] = client
+
+        await start_worker("vfs", [])
+        await start_worker("pager", ["--vfs-sock", socks["vfs"]])
+        await start_worker("librarian", ["--pager-sock", socks["pager"]])
+
+        self.bus = RemoteBus(self.handle)
+        for name, client in self._clients.items():
+            self.bus.register(name, client)
+
     async def close(self) -> None:
         self._state = "stopping"
-        await self.librarian.close()
-        await self.sched.stop()
-        await self.bus.stop()
-        await self.vfs.close()
-        await self.pager.close()
+        if self.split:
+            try:
+                await self.bus.call("librarian", "flush", timeout=10)
+            except Exception:
+                pass
+            await self.sched.stop()
+            await self.bus.stop()
+            await self._stop_workers()
+        else:
+            await self.librarian.close()
+            await self.sched.stop()
+            await self.bus.stop()
+            await self.vfs.close()
+            await self.pager.close()
         self.dag.close()
         self.journal.close()
         self._state = "stopped"
+
+    async def _stop_workers(self) -> None:
+        for proc in self._workers:
+            if proc.returncode is None:
+                proc.terminate()
+        for proc in self._workers:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                proc.kill()
+        self._workers.clear()
+        for handle in self._log_handles:
+            try:
+                handle.close()
+            except Exception:
+                pass
+        self._log_handles.clear()
 
     # ---------- 进程 ----------
 
@@ -129,9 +206,17 @@ class Microkernel:
             return await AgentProcess(mk).run(proc)
 
         started = time.time()
+        self._history_cache.append({"role": "user", "text": text, "ts": time.time()})
         proc = await self.spawn("chat", routine, payload={"text": text, "channel": channel})
         answer = await self.wait(proc.pid, timeout=timeout)
+        self._history_cache.append({"role": "assistant", "text": answer, "ts": time.time()})
+        del self._history_cache[:-200]
         self.spool.output(pid=proc.pid, channel=channel, text=answer)
+        if self.split:
+            try:
+                self._pager_stats = await self.bus.call("pager", "stats", timeout=5)
+            except Exception:
+                self._pager_stats = {}
         self._last_pid = proc.pid
         self._last = {
             "elapsed": round(time.time() - started, 2),
@@ -145,9 +230,13 @@ class Microkernel:
 
     @property
     def memory(self):
+        if self.split:
+            return _NullMemory()
         return self.pager.memory
 
     def history(self, limit: int = 100) -> list[dict]:
+        if self.split:
+            return list(self._history_cache[-limit:])
         return [{"role": t.role, "text": t.text, "ts": t.ts}
                 for t in self.pager.dialogue.history(limit=limit)]
 
@@ -223,6 +312,43 @@ class Microkernel:
                 self.table.set_state(pid, ProcState.RUNNING)
 
     def debug_snapshot(self) -> dict:
+        if self.split:
+            pages = self._pager_stats.get("pages", {})
+            graph = self._pager_stats.get("graph", {})
+            memory = self._pager_stats.get("memory", {})
+            return {
+                "state": self._state,
+                "uptime": round(time.time() - self.started_at, 1),
+                "processes": self.table.list(),
+                "process_stats": self.table.stats(),
+                "scheduler": self.sched.stats(),
+                "bus": self.bus.stats() if self.bus else {},
+                "services": self.bus.endpoints() if self.bus else [],
+                "pager": graph,
+                "pages": pages,
+                "memory": memory,
+                "dag": self.dag.stats(),
+                "journal": self.journal.stats(),
+                "librarian": {},
+                "vfs": {},
+                "spool": self.spool.stats(),
+                "memories": memory,
+                "turns": len(self._history_cache) // 2,
+                "model": "online" if getattr(self.model, "ready", False) else "offline",
+                "last": self._last,
+                "tools": [],
+                "events": [],
+                "kernel": {
+                    "nodes": self.dag.stats(),
+                    "pages": pages,
+                    "scheduler": self.sched.stats(),
+                    "journal": self.journal.stats(),
+                    "faults": self._pager_stats.get("faults", 0),
+                    "steps": 0,
+                    "path": self.dag.render(limit=6, pid=self._last_pid)
+                    if self._last_pid is not None else "",
+                },
+            }
         return {
             "state": self._state,
             "uptime": round(time.time() - self.started_at, 1),
@@ -256,3 +382,8 @@ class Microkernel:
                 if self._last_pid is not None else "",
             },
         }
+
+
+class _NullMemory:
+    def stats(self) -> dict:
+        return {"total": 0, "by_kind": {}}

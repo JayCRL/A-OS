@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -56,16 +57,19 @@ class LLMExtractor:
 class LibrarianService:
     name = "librarian"
 
-    def __init__(self, graph: GraphStore, *, model=None, project: str = "main") -> None:
+    def __init__(self, graph: GraphStore | None = None, *, model=None,
+                 backend=None, project: str = "main") -> None:
         self.graph = graph
         self.model = model
+        self.backend = backend
         self.extractor = LLMExtractor(model)
-        self.consolidator = Consolidator(graph, project=project)
+        self.consolidator = Consolidator(graph, project=project) if graph is not None else None
         self.queue: asyncio.Queue = asyncio.Queue()
         self._worker: asyncio.Task | None = None
         self.processed = 0
         self.skipped = 0
         self.errors = 0
+        self.last_error = ""
 
     async def start(self) -> None:
         if self._worker is None:
@@ -88,7 +92,9 @@ class LibrarianService:
             "processed": self.processed,
             "skipped": self.skipped,
             "errors": self.errors,
-            "graph": self.graph.stats(),
+            "last_error": self.last_error,
+            "graph": self.graph.stats() if self.graph is not None else {},
+            "remote": self.backend is not None,
         }
 
     async def _run(self) -> None:
@@ -100,8 +106,10 @@ class LibrarianService:
             except asyncio.CancelledError:
                 self.queue.task_done()
                 raise
-            except Exception:
+            except Exception as exc:
                 self.errors += 1
+                self.last_error = f"{type(exc).__name__}: {exc}"
+                traceback.print_exc()
             finally:
                 self.queue.task_done()
 
@@ -127,10 +135,24 @@ class LibrarianService:
             result=str(data.get("result", "")),
             depends_on=list(data.get("depends_on") or []),
         )
-        self.consolidator.ingest(episode)
+        if self.consolidator is not None:
+            self.consolidator.ingest(episode)
+        elif self.backend is not None:
+            payload = {
+                "text": episode.text, "module": episode.module, "task": episode.task,
+                "success": episode.success, "lesson": episode.lesson,
+                "artifact": episode.artifact, "attempts": episode.attempts,
+                "action": episode.action, "result": episode.result,
+                "depends_on": episode.depends_on,
+            }
+            await self.backend.call("pager", "commit_episode", **payload)
+        else:
+            self.skipped += 1
 
     async def close(self) -> None:
         await self.queue.join()
+        if self.backend is not None:
+            await self.backend.close()
         if self._worker:
             self._worker.cancel()
             try:

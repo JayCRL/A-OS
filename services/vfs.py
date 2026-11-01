@@ -47,6 +47,10 @@ class VFSService:
             return await self.tools.run(name, dict(params.get("args") or {}))
         if method == "tree":
             return self.tools.tree(limit=int(params.get("limit", 40)))
+        if method == "semantic":
+            query = str(params.get("query", ""))
+            k = int(params.get("k", 3))
+            return self.tools.semantic_hits(query, k=k)
         if method == "dma_load":
             return await self.dma_load(str(params.get("path", "")))
         if method == "dma_scan":
