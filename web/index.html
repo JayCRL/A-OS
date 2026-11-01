@@ -132,7 +132,7 @@
   }
   .sheet.on { opacity: 1; pointer-events: auto; }
   .sheet .panel {
-    position: absolute; right: 0; top: 0; bottom: 0; width: min(420px, 92vw);
+    position: absolute; right: 0; top: 0; bottom: 0; width: min(760px, 96vw);
     background: #11141b; border-left: 1px solid var(--line);
     padding: 18px; overflow-y: auto;
     transform: translateX(20px); transition: transform .22s;
@@ -145,6 +145,76 @@
     white-space: pre-wrap; word-break: break-word; font-size: 12px;
     color: #9aa3b8; background: #0c0e13; border: 1px solid var(--line);
     border-radius: 10px; padding: 10px; margin: 8px 0 18px;
+  }
+  .viz { display: flex; flex-direction: column; gap: 16px; }
+  .viz h4 {
+    margin: 0 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--dim);
+  }
+  .svc-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 9px; border-radius: 999px; font-size: 11px;
+    background: #0c0e13; border: 1px solid var(--line); color: #9aa3b8;
+  }
+  .chip b { color: var(--fg); font-weight: 500; }
+  .chip .led { width: 6px; height: 6px; border-radius: 50%; background: #5b6478; }
+  .chip .led.on { background: #5ad18a; box-shadow: 0 0 8px rgba(90,209,138,.6); }
+  .proc-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+    gap: 8px;
+  }
+  .proc {
+    position: relative; padding: 9px 10px; border-radius: 10px;
+    background: #0c0e13; border: 1px solid var(--line);
+    font-size: 12px; overflow: hidden;
+  }
+  .proc .pid { color: var(--dim); font-size: 10px; letter-spacing: .04em; }
+  .proc .pstate { float: right; font-size: 10px; }
+  .proc .pname { margin-top: 3px; color: var(--fg); }
+  .proc .pmeta { color: var(--dim); font-size: 10px; margin-top: 2px; }
+  .proc.running { border-color: #2f6b4a; }
+  .proc.running .pstate { color: #5ad18a; }
+  .proc.waiting { border-color: #2c3550; }
+  .proc.waiting .pstate { color: #8b9cff; }
+  .proc.ready { border-color: #5a4a19; }
+  .proc.ready .pstate { color: #ffb000; }
+  .proc.done, .proc.killed { opacity: .45; }
+  .mem-flex { display: flex; align-items: center; gap: 16px; }
+  .donut { width: 92px; height: 92px; border-radius: 50%; position: relative; flex: 0 0 auto; }
+  .donut::after {
+    content: ""; position: absolute; inset: 13px; border-radius: 50%;
+    background: #11141b;
+  }
+  .donut .center {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; z-index: 2;
+  }
+  .donut .center b { font-size: 18px; color: var(--fg); }
+  .donut .center span { font-size: 9px; color: var(--dim); }
+  .legend { display: flex; flex-direction: column; gap: 5px; font-size: 11px; color: #9aa3b8; }
+  .legend i { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 6px; }
+  .segbar { display: flex; height: 20px; border-radius: 6px; overflow: hidden; background: #0c0e13; }
+  .segbar span {
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; color: #0d1020; white-space: nowrap; overflow: hidden;
+    transition: width .3s;
+  }
+  .seglegend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; font-size: 10px; color: var(--dim); }
+  .seglegend i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; margin-right: 4px; }
+  .session-list { display: flex; flex-direction: column; gap: 6px; }
+  .session {
+    display: flex; align-items: center; gap: 8px; padding: 7px 9px;
+    border: 1px solid var(--line); border-radius: 8px; background: #0c0e13;
+    font-size: 11px; color: #9aa3b8;
+  }
+  .session .dot { width: 6px; height: 6px; border-radius: 50%; background: #8b9cff; }
+  .session b { color: var(--fg); font-weight: 500; }
+  .session .meta { margin-left: auto; color: var(--dim); font-size: 10px; }
+  .last {
+    padding: 9px 11px; border-radius: 8px; background: #0c0e13;
+    border: 1px solid var(--line); color: #b9c2d6; font-size: 12px;
+    white-space: pre-wrap;
   }
   .sheet .close { margin-top: 6px; width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: transparent; color: var(--dim); font: inherit; cursor: pointer; }
 
@@ -316,33 +386,112 @@ async function refreshDebug() {
   try {
     const r = await fetch('/api/debug');
     const d = await r.json();
-    const mk = (k, v) => `<div class="row"><span>${esc(k)}</span><span>${esc(v)}</span></div>`;
     const mem = d.memories || {}, k = d.kernel || {}, p = d.pages || k.pages || {};
-    const n = k.nodes || {}, ds = d.dispatcher || {};
-    const kinds = Object.entries(mem.by_kind || {}).map(([kk, v]) => `${kk} ${v}`).join(' · ') || '空';
-    const pstats = d.process_stats || {};
-    const procs = (d.processes || []).slice(0, 20)
-      .map(x => `#${x.pid} ${x.state.padEnd(7)} ${x.name} ${x.elapsed}s`).join('\n') || '（无）';
-    const sessions = (ds.list || []).slice(0, 12)
-      .map(x => `#${x.pid} ${x.channel} ${x.turns}轮 ${x.title || ''}`).join('\n') || '（无）';
-    const pages = (d.page_list || []).slice(0, 8)
-      .map(x => `#${x.id} ${x.segment} ${x.state} ${x.source || ''} ${x.preview}`).join('\n') || '（空）';
-    const tools = (d.tools || []).slice(-5).map(t => `${t.tool} ${t.ok ? '✓' : '✗'} ${t.elapsed}s`).join('\n') || '（还没用过）';
+    const n = k.nodes || {}, ds = d.dispatcher || {}, pstats = d.process_stats || {};
     const seg = p.segments || {};
-    body.innerHTML =
-      mk('进程', `${pstats.total || 0} 个 · 运行 ${pstats.running || 0} · 等待 ${pstats.waiting || 0}`) +
-      '<pre>' + esc(procs) + '</pre>' +
-      mk('会话', `${ds.sessions || 0} 个 · 复用 ${ds.reused || 0} · 新建 ${ds.created || 0}`) +
-      '<pre>' + esc(sessions) + '</pre>' +
-      mk('记忆', (mem.total || 0) + ' 条') + mk('分布', kinds) +
-      mk('页表', `活跃 ${p.active || 0} / 换出 ${p.swapped || 0} · ${p.active_tokens || 0} tok`) +
-      mk('分段', `SYS ${seg.system || 0} · HUMAN ${seg.human || 0} · DAG ${seg.dag || 0} · DATA ${seg.data || 0}`) +
-      mk('图', `${(d.pager || {}).active || 0} 节点 · ${(d.pager || {}).edges || 0} 边 · ${(d.pager || {}).trials || 0} 试错`) +
-      mk('状态树', `${n.total || 0} 节点 · 成功 ${n.success || 0}`) +
-      mk('缺页', k.faults || 0) + mk('最近', (d.last || {}).answer || '—') +
-      '<pre>' + esc(k.path || '（暂无路径）') + '</pre>' +
-      '<pre>' + esc(pages) + '</pre>' +
-      '<pre>' + esc(tools) + '</pre>';
+
+    const memColors = {identity:'#8b9cff', preference:'#5ad18a', fact:'#ffb000',
+                       plan:'#ff7ab6', episode:'#5b6478', summary:'#38bdf8'};
+    const kinds = Object.entries(mem.by_kind || {}).filter(([,v]) => v > 0);
+    const memTotal = kinds.reduce((a, [,v]) => a + v, 0);
+    let angle = 0;
+    const stops = kinds.map(([kk, v]) => {
+      const a0 = angle, a1 = angle + v / Math.max(1, memTotal) * 360;
+      angle = a1;
+      return `${memColors[kk] || '#5b6478'} ${a0}deg ${a1}deg`;
+    });
+    const donutBg = stops.length ? `conic-gradient(${stops.join(',')})` : '#1c2230';
+    const legend = kinds.map(([kk, v]) =>
+      `<span><i style="background:${memColors[kk] || '#5b6478'}"></i>${esc(kk)} <b>${v}</b></span>`
+    ).join('') || '<span>还没有记忆</span>';
+
+    const segDef = [['SYS', seg.system || 0, '#ffb000'], ['HUMAN', seg.human || 0, '#00ffff'],
+                    ['DAG', seg.dag || 0, '#5ad18a'], ['DATA', seg.data || 0, '#2f81f7']];
+    const segTotal = segDef.reduce((a, [,v]) => a + v, 0);
+    const segBar = segTotal
+      ? segDef.map(([name, v, color]) => {
+          const w = v / segTotal * 100;
+          return `<span style="width:${w}%;background:${color}" title="${name} ${v}">${w > 9 ? `${name} ${v}` : ''}</span>`;
+        }).join('')
+      : '<span style="width:100%;background:#1c2230;color:#5b6478">空</span>';
+    const segLegend = segDef.map(([name, v, color]) =>
+      `<span><i style="background:${color}"></i>${name} ${v}</span>`).join('');
+
+    const procs = (d.processes || []).slice(0, 24).map(x => {
+      const st = ['running','waiting','ready','done','killed'].includes(x.state) ? x.state : 'waiting';
+      return `<div class="proc ${st}">
+        <span class="pid">#${x.pid}</span><span class="pstate">${esc(x.state)}</span>
+        <div class="pname">${esc(x.name)}</div>
+        <div class="pmeta">${x.elapsed || 0}s${x.error ? ' · ' + esc(x.error) : ''}</div>
+      </div>`;
+    }).join('') || '<div class="pmeta">还没有进程</div>';
+
+    const sessions = (ds.list || []).slice(0, 10).map(x =>
+      `<div class="session"><i class="dot"></i>
+        <b>#${x.pid ?? '—'}</b><span>${esc(x.channel)} · ${x.turns} 轮</span>
+        <span>${esc(x.title || '')}</span>
+        <span class="meta">${x.idle}s</span>
+      </div>`).join('') || '<div class="pmeta">还没有会话</div>';
+
+    const bstats = (d.bus || {}).services || {};
+    const services = (d.services || []).map(name => {
+      const bs = bstats[name] || {};
+      const count = bs.processed != null ? bs.processed : (bs.calls != null ? bs.calls : '');
+      return `<span class="chip"><i class="led on"></i>${esc(name)}<b>${count}</b></span>`;
+    }).join('');
+
+    const graph = d.pager || {};
+    body.innerHTML = `<div class="viz">
+      <div>
+        <h4>内核服务</h4>
+        <div class="svc-row">${services}
+          <span class="chip">模型 <b>${esc(d.model || '—')}</b></span>
+          <span class="chip">状态树 <b>${n.total || 0}</b></span>
+          <span class="chip">图 <b>${graph.active || 0}</b> 节点</span>
+          <span class="chip">缺页 <b>${k.faults || 0}</b></span>
+        </div>
+      </div>
+
+      <div>
+        <h4>进程 · ${pstats.total || 0} 个（运行 ${pstats.running || 0} / 等待 ${pstats.waiting || 0}）</h4>
+        <div class="proc-grid">${procs}</div>
+      </div>
+
+      <div>
+        <h4>会话 · ${ds.sessions || 0} 个（复用 ${ds.reused || 0} / 新建 ${ds.created || 0}）</h4>
+        <div class="session-list">${sessions}</div>
+      </div>
+
+      <div>
+        <h4>记忆 · ${mem.total || 0} 条</h4>
+        <div class="mem-flex">
+          <div class="donut" style="background:${donutBg}">
+            <div class="center"><b>${memTotal}</b><span>MEM</span></div>
+          </div>
+          <div class="legend">${legend}</div>
+        </div>
+      </div>
+
+      <div>
+        <h4>页表 · 活跃 ${p.active || 0} / 换出 ${p.swapped || 0} · ${p.active_tokens || 0} tok</h4>
+        <div class="segbar">${segBar}</div>
+        <div class="seglegend">${segLegend}</div>
+      </div>
+
+      <div>
+        <h4>最近回答</h4>
+        <div class="last">${esc((d.last || {}).answer || '—')}</div>
+      </div>
+
+      <details>
+        <summary style="color:var(--dim);font-size:11px;cursor:pointer">状态路径 / 页 / 工具</summary>
+        <pre>${esc(k.path || '（暂无路径）')}</pre>
+        <pre>${esc((d.page_list || []).slice(0, 8).map(x =>
+          `#${x.id} ${x.segment} ${x.state} ${x.source || ''} ${x.preview}`).join('\n') || '（空）')}</pre>
+        <pre>${esc((d.tools || []).slice(-5).map(t =>
+          `${t.tool} ${t.ok ? '✓' : '✗'} ${t.elapsed}s`).join('\n') || '（还没用过）')}</pre>
+      </details>
+    </div>`;
   } catch (e) {
     body.innerHTML = '<div class="row"><span>读取失败</span><span>—</span></div>';
   }

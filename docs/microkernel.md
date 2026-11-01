@@ -121,12 +121,13 @@ mk.ask("继续搞登录页")
 
 网页右上角 `⋯`（或 `?debug=1`）每 2 秒刷新：
 
-- 进程：pid / state / name / 存活时间
-- 会话：pid / channel / turns / title
-- 记忆：总数 + 分类
-- 页表：活跃/换出、token、四段分布
-- 图：节点/边/试错
-- 状态树、缺页、最近回答、状态路径、页列表、工具调用
+- 顶部服务状态灯与调用计数
+- 进程卡片：状态色（running/waiting/ready）、pid、存活时间
+- 会话卡片：pid、channel、轮数、标题、空闲时间
+- 记忆环图：按 identity / preference / fact / plan / episode / summary 分区
+- 页表分段条：SYS / HUMAN / DAG / DATA 的活跃页占比
+- 图节点数、状态树、缺页、最近回答
+- 状态路径 / 页列表 / 工具调用收在折叠区，默认不铺数据
 
 这是观察"调度器是不是把消息塞进了同一个进程"最直接的地方。
 
