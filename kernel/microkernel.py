@@ -51,6 +51,7 @@ class Microkernel:
         self._history_cache: list[dict] = []
         self._pager_stats: dict = {"pages": {}, "graph": {}, "memory": {}, "faults": 0}
         self._log_handles: list = []
+        self._watch_task: asyncio.Task | None = None
         if split:
             self.bus = None  # boot 时换成 RemoteBus
             self.pager = None
@@ -124,6 +125,15 @@ class Microkernel:
             self._history_cache = await self.bus.call("pager", "history", limit=200)
         except Exception:
             pass
+        self._watch_task = asyncio.create_task(self._watch_stats(), name="kernel:stats")
+
+    async def _watch_stats(self) -> None:
+        while self._state in ("booting", "running"):
+            try:
+                self._pager_stats = await self.bus.call("pager", "stats", timeout=3)
+            except Exception:
+                pass
+            await asyncio.sleep(3)
 
     async def close(self) -> None:
         self._state = "stopping"
@@ -132,6 +142,13 @@ class Microkernel:
                 await self.bus.call("librarian", "flush", timeout=10)
             except Exception:
                 pass
+            if self._watch_task:
+                self._watch_task.cancel()
+                try:
+                    await self._watch_task
+                except asyncio.CancelledError:
+                    pass
+                self._watch_task = None
             await self.sched.stop()
             await self.bus.stop()
             await self._stop_workers()
