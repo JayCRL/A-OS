@@ -113,6 +113,43 @@ mk.ask("继续搞登录页")
 
 这就是"Dsh superagent"那类做法的小号版：Dispatcher 是入口调度，agent 进程是会话执行体；以后要加子 agent，只要让 Dispatcher 把任务路由到 child pid。
 
+## 记忆巩固与事件
+
+### memory_events
+
+每轮 pager 记录：
+
+```
+ts, pid, query, page_ids, used_ids, outcome, tokens, latency
+```
+
+用于后面做 bandit / 归因；现在 `used_ids` 和 `outcome` 先留空，不假装有奖励。
+
+### 每 8 轮 consolidation
+
+librarian 在 `observe` 满 8 条后触发：
+
+```
+recent_history(20)
+  → 模型压成 summary + facts + supersedes + open_tasks + topics
+  → pager.commit_summary：summary 进 MemoryStore
+  → pager.commit_memory：facts 进 profile
+  → 旧原文留在 episode，不删除
+```
+
+同进程用 `_PagerBridge`，split 走 pager RPC。
+
+### 1000 条基线
+
+`python3 -m tests.memory_eval`：
+
+```
+needle 50/500/900 全部 hit
+recall=3/3  broad_recall=3/3  add=0.37s
+```
+
+这是召回基线，不是回答质量基线。
+
 ## 实时进程/记忆面板
 
 网页右上角 `⋯`（或 `?debug=1`）每 2 秒刷新：
