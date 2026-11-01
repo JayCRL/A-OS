@@ -309,33 +309,59 @@ input.addEventListener('keydown', (e) => {
 });
 sendBtn.onclick = send;
 
-$('more').onclick = async () => {
-  $('sheet').classList.add('on');
+let debugTimer = null;
+
+async function refreshDebug() {
   const body = $('debug-body');
   try {
     const r = await fetch('/api/debug');
     const d = await r.json();
     const mk = (k, v) => `<div class="row"><span>${esc(k)}</span><span>${esc(v)}</span></div>`;
-    const mem = d.memories || {}, k = d.kernel || {}, p = k.pages || {}, n = k.nodes || {};
+    const mem = d.memories || {}, k = d.kernel || {}, p = d.pages || k.pages || {};
+    const n = k.nodes || {}, ds = d.dispatcher || {};
     const kinds = Object.entries(mem.by_kind || {}).map(([kk, v]) => `${kk} ${v}`).join(' · ') || '空';
-    const tools = (d.tools || []).slice(-5).map(t => `${t.tool} ${t.ok ? '✓' : '✗'} ${t.elapsed}s`).join('\n') || '（还没用过）';
+    const pstats = d.process_stats || {};
+    const procs = (d.processes || []).slice(0, 20)
+      .map(x => `#${x.pid} ${x.state.padEnd(7)} ${x.name} ${x.elapsed}s`).join('\n') || '（无）';
+    const sessions = (ds.list || []).slice(0, 12)
+      .map(x => `#${x.pid} ${x.channel} ${x.turns}轮 ${x.title || ''}`).join('\n') || '（无）';
     const pages = (d.page_list || []).slice(0, 8)
       .map(x => `#${x.id} ${x.segment} ${x.state} ${x.source || ''} ${x.preview}`).join('\n') || '（空）';
+    const tools = (d.tools || []).slice(-5).map(t => `${t.tool} ${t.ok ? '✓' : '✗'} ${t.elapsed}s`).join('\n') || '（还没用过）';
+    const seg = p.segments || {};
     body.innerHTML =
+      mk('进程', `${pstats.total || 0} 个 · 运行 ${pstats.running || 0} · 等待 ${pstats.waiting || 0}`) +
+      '<pre>' + esc(procs) + '</pre>' +
+      mk('会话', `${ds.sessions || 0} 个 · 复用 ${ds.reused || 0} · 新建 ${ds.created || 0}`) +
+      '<pre>' + esc(sessions) + '</pre>' +
       mk('记忆', (mem.total || 0) + ' 条') + mk('分布', kinds) +
-      mk('对话', (d.turns || 0) + ' 轮') + mk('模型', d.model) +
+      mk('页表', `活跃 ${p.active || 0} / 换出 ${p.swapped || 0} · ${p.active_tokens || 0} tok`) +
+      mk('分段', `SYS ${seg.system || 0} · HUMAN ${seg.human || 0} · DAG ${seg.dag || 0} · DATA ${seg.data || 0}`) +
+      mk('图', `${(d.pager || {}).active || 0} 节点 · ${(d.pager || {}).edges || 0} 边 · ${(d.pager || {}).trials || 0} 试错`) +
       mk('状态树', `${n.total || 0} 节点 · 成功 ${n.success || 0}`) +
-      mk('页表', `活跃 ${p.active || 0} / 换出 ${p.swapped || 0}`) +
-      mk('缺页', k.faults || 0) + mk('本轮步数', k.steps || 0) +
+      mk('缺页', k.faults || 0) + mk('最近', (d.last || {}).answer || '—') +
       '<pre>' + esc(k.path || '（暂无路径）') + '</pre>' +
       '<pre>' + esc(pages) + '</pre>' +
       '<pre>' + esc(tools) + '</pre>';
   } catch (e) {
     body.innerHTML = '<div class="row"><span>读取失败</span><span>—</span></div>';
   }
-};
-$('close-sheet').onclick = () => $('sheet').classList.remove('on');
-$('sheet').onclick = (e) => { if (e.target === $('sheet')) $('sheet').classList.remove('on'); };
+}
+
+function openDebug() {
+  $('sheet').classList.add('on');
+  refreshDebug();
+  if (debugTimer) clearInterval(debugTimer);
+  debugTimer = setInterval(refreshDebug, 2000);
+}
+function closeDebug() {
+  $('sheet').classList.remove('on');
+  if (debugTimer) { clearInterval(debugTimer); debugTimer = null; }
+}
+
+$('more').onclick = openDebug;
+$('close-sheet').onclick = closeDebug;
+$('sheet').onclick = (e) => { if (e.target === $('sheet')) closeDebug(); };
 
 // 视觉键盘适配
 if (window.visualViewport) {

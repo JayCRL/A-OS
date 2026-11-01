@@ -193,8 +193,8 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         echo = EchoModel()
         self.mk.model = echo
         self.mk.librarian.model = echo
-        await self.mk.ask("第一句话")
-        await self.mk.ask("第二句话")
+        await self.mk.ask("第一句话", channel="a")
+        await self.mk.ask("第二句话", channel="b")
         procs = sorted(self.mk.table._procs.values(), key=lambda p: p.pid)
         first = (await self.mk.bus.call("kernel", "state_render", pid=procs[0].pid))["text"]
         second = (await self.mk.bus.call("kernel", "state_render", pid=procs[1].pid))["text"]
@@ -283,8 +283,8 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.mk.model = echo
         self.mk.librarian.model = echo
         answers = await asyncio.gather(
-            self.mk.ask("进程A的消息"),
-            self.mk.ask("进程B的消息"),
+            self.mk.ask("进程A的消息", channel="a"),
+            self.mk.ask("进程B的消息", channel="b"),
         )
         self.assertEqual(answers, ["看到图里的内容了。", "看到图里的内容了。"])
         procs = sorted(self.mk.table._procs.values(), key=lambda p: p.pid)

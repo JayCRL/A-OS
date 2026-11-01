@@ -21,6 +21,9 @@ CONTINUE = (
     "？", "?", "还有", "展开", "详细", "说说",
 )
 
+# 只有用户明确说"换任务/新话题"时才另起进程；其余默认续在当前会话
+NEW_TASK = ("新任务", "新话题", "另一个任务", "换一个任务", "换个话题", "重新开始")
+
 
 def _grams(text: str) -> set[str]:
     low = (text or "").lower()
@@ -48,7 +51,7 @@ class Session:
     last_active: float = field(default_factory=time.time)
     last_text: str = ""
     turns: int = 0
-    idle_seconds: float = 1800.0
+    idle_seconds: float = 600.0
 
     def expired(self, now: float | None = None) -> bool:
         return (now or time.time()) - self.last_active > self.idle_seconds
@@ -68,12 +71,12 @@ class Dispatcher:
         active = [s for s in self.sessions.values()
                   if s.channel == channel and not s.expired(now)]
         if active:
-            last = max(active, key=lambda s: s.last_active)
-            cue = any(c in text for c in CONTINUE)
-            if cue or _sim(text, last.last_text) >= 0.18:
+            # 同一个 channel 默认就是同一段对话；只有明确"新任务"才另起进程
+            if not any(mark in text for mark in NEW_TASK):
+                best = max(active, key=lambda s: (_sim(text, s.last_text), s.last_active))
                 self.routed += 1
                 self.reused += 1
-                return last, False
+                return best, False
 
         session = Session(
             id=uuid.uuid4().hex[:10],
