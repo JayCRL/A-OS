@@ -142,6 +142,7 @@ PageTable（全局页帧）
 - `_enforce_data_cap(pid)` 只淘汰本进程的 DATA；
 - 同一图节点被两个进程缺页，会各有一份 DATA 页（帧暂不共享）；
 - 并发 `ask()` 不再加锁；两个进程同时对话，HUMAN 页不会串。
+- 新进程 `begin_turn` 会从 Dialogue 导入最近 8 轮，映射成自己的 DAG_STATE 页；"要""继续"这类指代能接住。
 
 ## 服务边界
 
@@ -180,7 +181,7 @@ python3 -m unittest tests.test_microkernel -v
 python3 tests/mk_demo.py
 ```
 
-17 个微内核用例：
+18 个微内核用例：
 
 - 启动/服务注册/内核 state
 - 未知服务
@@ -198,11 +199,12 @@ python3 tests/mk_demo.py
 - 并发两个 ask：各自的 HUMAN 页不串、各带一份 SYSTEM
 - 文件块缺页：图空时从 VFS 语义索引换入
 - split 模式：三个独立进程、远程 pager/librarian/vfs 流程
+- 跨进程上下文：第二个 pid 能看到上一轮回答
 
 全量：
 
 ```
-Ran 42 tests in 13.5s
+Ran 43 tests in 15.7s
 OK
 ```
 
