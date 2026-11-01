@@ -141,27 +141,23 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(stats["processes"].get("total", 0), 1, stats)
         self.assertGreaterEqual(stats["processes"].get("waiting", 0), 1, stats)
 
-    async def test_page_fault_trap_loads_graph_pages(self) -> None:
+    async def test_auto_prefetch_loads_graph_pages(self) -> None:
         await self._seed()
-        model = ScriptModel([
-            "<|PAGE_FAULT: 继续搞登录页|>",
-            "登录页有一个越权任务，已经完成。",
-        ])
+        model = EchoModel()
         self.mk.model = model
         self.mk.librarian.model = model
         self.mk.pager.memory.add("用户叫 JustProve", kind="identity")
 
         answer = await self.mk.ask("继续搞登录页")
-        self.assertIn("越权", answer)
-        second_prompt = model.prompts[-1][-1]["content"]
-        self.assertIn("登录页", second_prompt)
-        self.assertIn("JustProve", second_prompt)
+        self.assertTrue(answer)
+        prompt = model.prompts[-1][-1]["content"]
+        self.assertIn("登录页", prompt)
+        self.assertIn("JustProve", prompt)
         pages = self.mk.pager.mmu.stats()
         self.assertGreaterEqual(pages["segments"]["system"], 1, pages)
         self.assertGreaterEqual(pages["segments"]["data"], 1, pages)
         sources = [p.source for p in self.mk.pager.mmu._pages.values()]
         self.assertTrue(any(s.startswith("graph:") for s in sources), sources)
-        self.assertGreaterEqual((await self.mk.bus.call("pager", "stats"))["faults"], 1)
         self.assertIn((await self.mk.bus.call("kernel", "processes"))[0]["state"],
                       ("waiting", "running"))
 
@@ -202,25 +198,22 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("第二句话", first)
         self.assertIn("第二句话", second)
 
-    async def test_file_block_fault_when_graph_empty(self) -> None:
+    async def test_auto_prefetch_loads_file_chunk(self) -> None:
         (self.home / "workspace").mkdir(parents=True, exist_ok=True)
         (self.home / "workspace" / "auth.md").write_text(
             "登录接口要保证幂等：重复提交只处理一次，使用请求号去重。\n",
             encoding="utf-8",
         )
         await self.mk.bus.call("vfs", "dma_scan")
-        model = ScriptModel([
-            "<|PAGE_FAULT: 登录接口 幂等|>",
-            "登录接口用请求号去重来保证幂等。",
-        ])
+        model = EchoModel()
         self.mk.model = model
         self.mk.librarian.model = model
-        answer = await self.mk.ask("登录接口怎么保证幂等")
-        self.assertIn("幂等", answer)
+        await self.mk.ask("登录接口怎么保证幂等")
+        prompt = model.prompts[-1][-1]["content"]
+        self.assertIn("幂等", prompt)
         pages = [p for p in self.mk.pager.mmu._pages.values() if p.tag == "file"]
-        self.assertTrue(pages, "图里没有时应换入 VFS 文件块")
+        self.assertTrue(pages, "没有显式缺页时也应自动换入 VFS 文件块")
         self.assertTrue(any(p.source.startswith("file:") for p in pages))
-        self.assertGreaterEqual((await self.mk.bus.call("pager", "stats"))["faults"], 1)
 
     async def test_web_routes_use_microkernel(self) -> None:
         from aiohttp.test_utils import TestClient, TestServer

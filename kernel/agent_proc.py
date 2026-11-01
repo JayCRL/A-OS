@@ -1,6 +1,6 @@
-"""agent 进程：走内核缺页陷阱，用 pager 的段页式上下文。
+"""agent 进程：pager 自动把相关记忆/文件/图节点装进上下文。
 
-进程不直接持有 PageTable；它只发 compose / fault / state / journal IPC。
+进程不持有 PageTable，也不需要模型发缺页；只发 compose / state / journal IPC。
 """
 
 from __future__ import annotations
@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import re
 
-from drivers.protocol import faults as parse_faults
 from kernel import persona
 from kernel.process import Process
 
@@ -61,16 +60,15 @@ class AgentProcess:
 
         begin = await self.bus.call("pager", "begin_turn", pid=proc.pid, text=text)
         profile = begin.get("profile") or []
+        await self.bus.call("pager", "prefetch", pid=proc.pid, query=text)
         goal = await self.bus.call("kernel", "state_add", pid=proc.pid,
                                    content=f"用户：{text[:70]}", kind="goal")
         task_id = (await self.bus.call("kernel", "journal_register", text=text,
                                        node_id=goal["id"]))["task_id"]
 
-        hot: list[int] = []
         trace: list[str] = []
         answer: str | None = None
         last_prompt = ""
-        seen_faults: list[str] = []
         used_web = False
         web_nudged = False
 
@@ -79,7 +77,7 @@ class AgentProcess:
                                        limit=5))["text"]
             composed = await self.bus.call(
                 "pager", "compose", pid=proc.pid, query=text, dag=dag,
-                profile=profile, must_include=hot, budget=self.k.budget,
+                profile=profile, must_include=[], budget=self.k.budget,
             )
             last_prompt = composed["prompt"]
             if trace:
@@ -89,21 +87,6 @@ class AgentProcess:
                 [{"role": "user", "content": last_prompt}], max_tokens=1100
             )
             raw = reply.text
-
-            wanted = parse_faults(raw)
-            if wanted:
-                result = await self.bus.call("kernel", "fault", pid=proc.pid,
-                                             targets=wanted, hot=hot)
-                hot = list(result.get("hot") or [])
-                seen_faults.append(wanted[0])
-                await self.bus.call("kernel", "state_add", pid=proc.pid,
-                                    content=f"换入 {wanted[0][:60]}", kind="fault")
-                await self.bus.call("kernel", "journal_checkpoint", task_id=task_id,
-                                    node_id=goal["id"], round=step, steps=step)
-                trace.append(f"#{step} 缺页「{wanted[0]}」→ {result['messages'][:160]}")
-                if len(seen_faults) >= 3 and len(set(seen_faults[-3:])) == 1:
-                    trace.append("[系统中断] 同一个目标重复三次，换目标或直接回答。")
-                continue
 
             tool = parse_tool(raw)
             if tool is not None:
@@ -151,7 +134,7 @@ class AgentProcess:
     async def _force_answer(self, prompt: str) -> str:
         try:
             reply = await self.k.model.chat(
-                [{"role": "user", "content": prompt + "\n\n[系统] 步数到了，不要再要页，直接用一两句话回答。"}],
+                [{"role": "user", "content": prompt + "\n\n[系统] 步数到了，不要再调用工具，直接用一两句话回答。"}],
                 max_tokens=300,
             )
             return clean(reply.text)

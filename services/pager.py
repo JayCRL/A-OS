@@ -60,6 +60,8 @@ class PagerService:
                 str(params.get("dag", "")), list(params.get("profile") or []),
                 set(params.get("must_include") or []), int(params.get("budget", 8000)),
             )
+        if method == "prefetch":
+            return await self.prefetch(int(params["pid"]), str(params.get("query", "")))
         if method == "fault":
             return await self.fault(int(params["pid"]), list(params.get("targets") or []),
                                     set(params.get("hot") or []))
@@ -165,6 +167,39 @@ class PagerService:
             pid=pid,
         )
         return {"prompt": prompt, "pages": ids, "budget": budget}
+
+    async def prefetch(self, pid: int, query: str) -> dict:
+        """自动预取：图节点 + VFS 文件块，不需要模型发缺页。"""
+
+        if not query.strip():
+            return {"pages": 0}
+        added = 0
+        nodes = self.retriever.retrieve(query, k=3)
+        if any(n.type != "project" for n in nodes):
+            for node in nodes:
+                self.mmu.upsert(
+                    self.graph.render(node), source=f"graph:{node.id}",
+                    vec=node.vec if node.vec is not None else self.encoder.encode_one(node.title),
+                    importance=node.importance, tag="graph", segment=Segment.DATA, pid=pid,
+                )
+                added += 1
+        if self.bus is not None:
+            try:
+                hits = await self.bus.call("vfs", "semantic", query=query, k=3)
+            except Exception:
+                hits = []
+            for hit in hits[:2]:
+                if float(hit.get("score", 0)) < 0.30:
+                    continue
+                body = str(hit.get("text", ""))[:1800]
+                self.mmu.upsert(
+                    f"文件 {hit.get('path', '')}：\n{body}",
+                    source=str(hit.get("source", "")),
+                    vec=self.encoder.encode_one(body[:800]),
+                    importance=0.85, tag="file", segment=Segment.DATA, pid=pid,
+                )
+                added += 1
+        return {"pages": added}
 
     async def fault(self, pid: int, targets: list[str], hot: set[int] | list[int]) -> dict:
         """图优先：图节点 → VFS 文件块 → 长期记忆，全部映射成 DATA 页。"""
