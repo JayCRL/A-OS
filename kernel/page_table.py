@@ -59,7 +59,7 @@ class Page:
         self.content = text
         self.tokens = estimate_tokens(text)
         if vec is not None:
-            self.vec = list(vec)
+            self.vec = [float(x) for x in vec]
 
 
 DEFAULT_WEIGHTS = {"sim": 1.0, "recency": 0.3, "refs": 0.15, "importance": 0.35}
@@ -139,8 +139,8 @@ class PageTable:
             (
                 page.page_id, page.content, page.state.value, int(page.pinned),
                 page.importance, page.refs, page.created_at, page.last_used,
-                json.dumps(page.vec) if page.vec else None, page.tag, page.tokens,
-                page.source, int(page.stale), page.segment.value,
+                json.dumps([float(x) for x in page.vec]) if page.vec else None,
+                page.tag, page.tokens, page.source, int(page.stale), page.segment.value,
             ),
         )
         self._conn.commit()
@@ -155,7 +155,8 @@ class PageTable:
             pinned = True
         page = Page(
             page_id=0, content=content or "（空）", pinned=pinned,
-            importance=importance, vec=list(vec) if vec else None,
+            importance=importance,
+            vec=[float(x) for x in vec] if vec is not None and len(vec) else None,
             tag=tag, source=source, segment=seg,
         )
         cur = self._conn.execute(
@@ -164,8 +165,8 @@ class PageTable:
             " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (page.content, page.state.value, int(page.pinned), page.importance, 0,
              page.created_at, page.last_used,
-             json.dumps(page.vec) if page.vec else None, page.tag, page.tokens,
-             page.source, 0, page.segment.value),
+             json.dumps([float(x) for x in page.vec]) if page.vec else None,
+             page.tag, page.tokens, page.source, 0, page.segment.value),
         )
         self._conn.commit()
         page.page_id = int(cur.lastrowid)
@@ -443,7 +444,7 @@ def _render_page(page: Page) -> str:
 
 
 def _cosine(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
-    if not a or not b or len(a) != len(b):
+    if a is None or b is None or len(a) != len(b):
         return 0.0
     dot = na = nb = 0.0
     for x, y in zip(a, b):

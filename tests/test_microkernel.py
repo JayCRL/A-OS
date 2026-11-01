@@ -16,6 +16,22 @@ from kernel.process import ProcState  # noqa: E402
 from tests.fake_encoder import TokenEncoder  # noqa: E402
 
 
+class ScriptModel:
+    ready = True
+
+    def __init__(self, answers):
+        self.usage = Usage()
+        self.answers = list(answers)
+        self.prompts = []
+
+    async def chat(self, messages, *, max_tokens=512, temperature=0.3):
+        system = str(messages[0].get("content", ""))
+        if "编目器" in system:
+            return ModelReply('{"noise": true}', Usage(10, 5))
+        self.prompts.append(messages)
+        return ModelReply(self.answers.pop(0) if self.answers else "好的。", Usage(10, 5))
+
+
 class EchoModel:
     ready = True
 
@@ -105,7 +121,7 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.mk = Microkernel(self.home, model=None, encoder=TokenEncoder())
         await self.mk.boot()
         after = await self.mk.bus.call("pager", "stats")
-        self.assertEqual(after["by_type"].get("task"), before["by_type"].get("task"))
+        self.assertEqual(after["graph"]["by_type"].get("task"), before["by_type"].get("task"))
         ctx = await self.mk.bus.call("pager", "resolve", query="继续搞登录页", k=5)
         self.assertTrue(any("登录页" in item["title"] for item in ctx), ctx)
 
@@ -121,6 +137,41 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("用户：继续搞登录页", prompt)
         stats = await self.mk.bus.call("kernel", "stats")
         self.assertGreaterEqual(stats["processes"].get("done", 0), 1, stats)
+
+    async def test_page_fault_trap_loads_graph_pages(self) -> None:
+        await self._seed()
+        model = ScriptModel([
+            "<|PAGE_FAULT: 继续搞登录页|>",
+            "登录页有一个越权任务，已经完成。",
+        ])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        self.mk.pager.memory.add("用户叫 JustProve", kind="identity")
+
+        answer = await self.mk.ask("继续搞登录页")
+        self.assertIn("越权", answer)
+        second_prompt = model.prompts[-1][-1]["content"]
+        self.assertIn("登录页", second_prompt)
+        self.assertIn("JustProve", second_prompt)
+        pages = self.mk.pager.mmu.stats()
+        self.assertGreaterEqual(pages["segments"]["system"], 1, pages)
+        self.assertGreaterEqual(pages["segments"]["data"], 1, pages)
+        sources = [p.source for p in self.mk.pager.mmu._pages.values()]
+        self.assertTrue(any(s.startswith("graph:") for s in sources), sources)
+        self.assertEqual((await self.mk.bus.call("kernel", "processes"))[0]["state"], "done")
+
+    async def test_state_tree_is_per_process(self) -> None:
+        echo = EchoModel()
+        self.mk.model = echo
+        self.mk.librarian.model = echo
+        await self.mk.ask("第一句话")
+        await self.mk.ask("第二句话")
+        procs = sorted(self.mk.table._procs.values(), key=lambda p: p.pid)
+        first = (await self.mk.bus.call("kernel", "state_render", pid=procs[0].pid))["text"]
+        second = (await self.mk.bus.call("kernel", "state_render", pid=procs[1].pid))["text"]
+        self.assertIn("第一句话", first)
+        self.assertNotIn("第二句话", first)
+        self.assertIn("第二句话", second)
 
     async def test_bus_counts(self) -> None:
         await self.mk.bus.call("kernel", "ping")

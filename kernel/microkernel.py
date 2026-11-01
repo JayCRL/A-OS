@@ -15,8 +15,10 @@ from typing import Any, Awaitable, Callable
 from drivers.embedding import load_encoder
 from drivers.model import DeepSeekKernel, OfflineKernel
 from kernel.ipc import MessageBus
+from kernel.journal import Journal
 from kernel.kernel_scheduler import Job, KernelScheduler
 from kernel.process import ProcState, Process, ProcessTable
+from kernel.state_dag import StateDAG
 from services.librarian import LibrarianService
 from services.pager import PagerService
 
@@ -41,6 +43,9 @@ class Microkernel:
         self.sched = KernelScheduler(max_workers=3)
         self.pager = PagerService(self.home, self.encoder)
         self.librarian = LibrarianService(self.pager.graph, model=self.model)
+        self.dag = StateDAG(self.home / "dag.db")
+        self.journal = Journal(self.home / "tasks.db")
+        self.budget = int(os.environ.get("AOS_CTX_BUDGET", "8000"))
         self._state = "booting"
         self.started_at = time.time()
 
@@ -62,6 +67,8 @@ class Microkernel:
         await self.sched.stop()
         await self.bus.stop()
         await self.pager.close()
+        self.dag.close()
+        self.journal.close()
         self._state = "stopped"
 
     # ---------- 进程 ----------
@@ -125,9 +132,61 @@ class Microkernel:
                 "scheduler": self.sched.stats(),
                 "bus": self.bus.stats(),
             }
+        if method == "fault":
+            return await self._fault(params)
+        if method == "compose":
+            return await self.bus.call("pager", "compose", **params)
+        if method == "state_add":
+            pid = int(params.get("pid", 0))
+            head = self.dag.head(pid)
+            node = self.dag.add(
+                str(params.get("content", ""))[:200],
+                parent_id=head.node_id if head else None,
+                kind=str(params.get("kind", "step")), pid=pid,
+            )
+            return {"id": node.node_id}
+        if method == "state_render":
+            return {"text": self.dag.render(limit=int(params.get("limit", 5)),
+                                            pid=int(params.get("pid", 0)))}
+        if method == "state_prune":
+            self.dag.prune(int(params["node_id"]), pid=int(params.get("pid", 0)))
+            return {"ok": True}
+        if method == "state_stats":
+            return self.dag.stats()
+        if method == "journal_register":
+            task_id = self.journal.register(str(params.get("text", "")),
+                                            int(params.get("node_id", 0)))
+            self.journal.claim(task_id)
+            return {"task_id": task_id}
+        if method == "journal_checkpoint":
+            self.journal.checkpoint(
+                str(params["task_id"]),
+                node_id=int(params.get("node_id", 0)),
+                round_no=int(params.get("round", 0)),
+                steps=int(params.get("steps", 0)),
+            )
+            return {"ok": True}
+        if method == "journal_finish":
+            self.journal.finish(str(params["task_id"]), str(params.get("status", "done")))
+            return {"ok": True}
         if method == "ping":
             return "pong"
         raise ValueError(f"kernel 没有方法：{method}")
+
+    async def _fault(self, params: dict) -> dict:
+        pid = int(params["pid"])
+        proc = self.table.get(pid)
+        if proc is not None:
+            self.table.set_state(pid, ProcState.WAITING)
+        try:
+            return await self.bus.call(
+                "pager", "fault", pid=pid,
+                targets=list(params.get("targets") or []),
+                hot=list(params.get("hot") or []),
+            )
+        finally:
+            if proc is not None:
+                self.table.set_state(pid, ProcState.RUNNING)
 
     def debug_snapshot(self) -> dict:
         return {
@@ -139,5 +198,9 @@ class Microkernel:
             "bus": self.bus.stats(),
             "services": self.bus.endpoints(),
             "pager": self.pager.graph.stats(),
+            "pages": self.pager.mmu.stats(),
+            "memory": self.pager.memory.stats(),
+            "dag": self.dag.stats(),
+            "journal": self.journal.stats(),
             "librarian": self.librarian.stats(),
         }
