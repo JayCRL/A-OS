@@ -47,7 +47,7 @@ class Worker:
             await asyncio.sleep(10)
 
     async def _handle(self, task: Task) -> None:
-        from main import AOS
+        from kernel.agent import Agent
 
         started = time.time()
         print(f"[{self.name}] 接单 {task.task_id}: {task.goal[:40]}", flush=True)
@@ -56,18 +56,18 @@ class Worker:
         (home / "workspace").mkdir(exist_ok=True)
 
         os.environ["AOS_HOME"] = str(home)
-        aos = AOS(home=home)
+        agent = Agent(home)
         try:
-            await aos.boot()
-            node = aos.dag.add(task.goal, kind="goal")
-            await aos._step(node, None, task_id=None)
+            await agent.boot()
+            answer = await agent.reply(task.goal)
+            await agent.wait_idle()
             result = {
                 "task_id": task.task_id,
                 "worker": self.name,
                 "ok": True,
                 "elapsed": round(time.time() - started, 1),
-                "tokens": aos.kernel.usage.total,
-                "summary": aos.dag.render(limit=3)[-300:],
+                "tokens": getattr(getattr(agent.model, "usage", None), "total", 0),
+                "summary": answer[:600],
             }
         except Exception as exc:  # noqa: BLE001
             result = {
@@ -78,7 +78,8 @@ class Worker:
                 "elapsed": round(time.time() - started, 1),
             }
         finally:
-            await aos.shutdown()
+            await agent.wait_idle()
+            await agent.close()
 
         await self.broker.report(result)
         print(f"[{self.name}] 完成 {task.task_id} ok={result['ok']} {result.get('elapsed')}s", flush=True)

@@ -5,3 +5,5 @@ models/
 *.db
 *.db-wal
 *.db-shm
+docs/ui-*.png
+.env

@@ -1,0 +1,5 @@
+aiohttp>=3.9
+numpy>=1.24
+onnxruntime>=1.16
+tokenizers>=0.15
+redis>=5.0

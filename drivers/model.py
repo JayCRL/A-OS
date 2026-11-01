@@ -150,3 +150,12 @@ class OfflineKernel:
     async def infer(self, prompt: str, *, budget: int = 4000) -> str:
         await asyncio.sleep(0.01)
         return "决定：继续当前分支（离线模式）"
+
+    async def chat(self, messages: list[dict], *, max_tokens: int = 512, temperature: float = 0.3) -> ModelReply:
+        await asyncio.sleep(0.01)
+        system = str((messages[0] or {}).get("content", ""))
+        if "记忆整理器" in system:
+            return ModelReply("[]")
+        if "对话归档器" in system:
+            return ModelReply("")
+        return ModelReply("我这边还没接上模型，等配好 Key 再聊。")

@@ -1,168 +1,232 @@
 # A-OS
 
-把操作系统的内存管理与进程调度搬进 LLM Agent 的运行时：上下文不是一段不断变长的 `messages` 数组，而是一块可以被换页、可以被淘汰、可以按段隔离的虚拟内存。
+把操作系统的内存管理与进程调度搬进 LLM Agent 的运行时：上下文不是一段不断变长的 `messages` 数组，而是一块可以被换页、被淘汰、按段隔离的虚拟内存。
 
-```mermaid
-flowchart TB
-    subgraph 入口
-        A1[终端 / WebSocket] --> A2[IO Spooler<br/>2 秒防抖合并]
-    end
-
-    A2 --> B1
-
-    subgraph 内核
-        B1[调度器<br/>优先级队列 · 协程取消]
-        B2[上下文组装<br/>段页式]
-        B3[动作执行<br/>读写 · shell · MCP]
-        B4[看门狗<br/>重复动作 · 预算]
-        B1 --> B2 --> B3 --> B4
-        B4 -.-> B1
-    end
-
-    subgraph 状态
-        C1[PageTable<br/>SYSTEM / HUMAN / DAG / DATA]
-        C2[StateDAG<br/>CoW · 剪枝]
-        C3[Journal<br/>检查点 · 租约]
-    end
-
-    B2 <--> C1
-    B3 --> C2
-    B1 <--> C3
-    C1 --> D1[缺页中断<br/>磁盘 / 向量索引]
-    D1 --> C1
-
-    subgraph 集群
-        E1[Redis 队列] --> E2[Worker 1]
-        E1 --> E3[Worker 2]
-    end
-    B1 -.-> E1
-```
-
-### 缺页流程
-
-```mermaid
-sequenceDiagram
-    participant M as 模型
-    participant K as 内核
-    participant P as 页表
-    participant S as 磁盘 / 向量索引
-
-    M->>K: <|PAGE_FAULT: mathx.py|>
-    K->>P: 该文件在内存里吗
-    P-->>K: 不在
-    K->>S: 按路径找，找不到走语义检索
-    S-->>K: 文件内容
-    K->>P: 换入新页（DATA 段）
-    P->>P: 超过 5 页，LRU 换出最老的 DATA
-    K->>M: 带着新页继续推理
-```
-
-## 它解决什么
-
-普通 Agent 跑长任务时，上下文只会一路堆叠，跑到几十轮就 token 爆炸、开始"忘记自己在干什么"。
-
-A-OS 的做法是给它一套操作系统的约束：
-
-- **分页**：文件内容按需换入，不预先全塞
-- **分段**：系统、人类指令、任务状态、数据四段隔离，低优先级的才允许淘汰
-- **缺页中断**：模型缺信息时发信号，内核去磁盘或向量索引里把页换进来
-- **状态树**：记录的是"做过什么"的抽象状态，不是原始 JSON 日志
-- **看门狗**：检测空转和重复动作，超预算就掐断
-
-## 控制台
-
-桌面三栏（状态树 / 终端 / 页表），手机切 Tab，输入框固定在底部。
-
-![控制台桌面版](docs/desktop.png)
-
-<p align="left">
-  <img src="docs/mobile.png" width="300" alt="手机版">
-</p>
-
-## 核心模块
-
-| 模块 | 作用 |
-|---|---|
-| `kernel/page_table.py` | 页表：四段内存、LRU、语义检索、失效 |
-| `kernel/state_dag.py` | 状态树：CoW 分支、成功后验剪枝 |
-| `kernel/kernel_scheduler.py` | 调度：优先级队列、协程取消、文件锁 |
-| `kernel/io_spooler.py` | 输入防抖：2 秒内的操作合并成一个中断事件 |
-| `kernel/executor.py` | 动作执行：读写、列目录、搜索、shell、MCP |
-| `kernel/shell_sandbox.py` | 命令白名单、路径锁定、超时、输出截断 |
-| `kernel/journal.py` | 任务日志与崩溃恢复，租约防抢 |
-| `kernel/progress.py` | 进度看门狗：重复动作检测、读配额 |
-| `kernel/depgraph.py` | 依赖图：改文件后相关记忆自动失效 |
-| `kernel/memindex.py` | 向量索引：文件切块 + bge 编码，缺页按语义寻址 |
-| `kernel/lock.py` | 跨进程锁：Redis SET NX 优先，fcntl 兜底 |
-| `kernel/sanitize.py` | 上下文净化：剥掉原始 JSON，只留人话状态 |
-| `drivers/model.py` | 模型驱动：OpenAI 兼容接口，带重试和 token 记账 |
-| `drivers/embedding.py` | 本地向量：bge-small-zh（ONNX，CPU） |
-| `drivers/protocol.py` | 动作协议与缺页信号解析 |
-| `cluster/` | 多进程 Worker 集群：Redis 队列 + 结果 Pub/Sub |
-| `web/` | 控制台：状态树拓扑图、终端流、页表，适配手机 |
-
-## 快速开始
-
-```bash
-# 依赖
-pip install onnxruntime tokenizers redis aiohttp
-
-# 本地向量模型（约 91MB，从 ModelScope 下）
-mkdir -p models/bge-small-zh && cd models/bge-small-zh
-curl -L -o model.onnx "https://modelscope.cn/models/Xenova/bge-small-zh-v1.5/resolve/master/onnx/model.onnx"
-curl -L -o tokenizer.json "https://modelscope.cn/models/Xenova/bge-small-zh-v1.5/resolve/master/tokenizer.json"
-
-# 模型 key（也可以用环境变量 DEEPSEEK_API_KEY）
-echo "DEEPSEEK_API_KEY=sk-..." > ~/.dsh/.env
-
-# 终端模式
-AOS_HOME=/opt/aos/data python3 main.py
-
-# Web 控制台
-AOS_HOME=/opt/aos/data python3 main.py --web --port 8799
-```
-
-没有模型 key 会自动降级到离线内核；没有向量模型会退化成字符哈希，流程仍能跑通。
-
-## 一次任务长什么样
+但用户不该看见这些。对用户来说，它就是一个能接话、记性很好的助手：
 
 ```
-[缺页中断] 换入 mathx.py → 页 #2
-[1] write → OK 写入 mathx.py（31 字符）
-[依赖失效] mathx.py 改动，作废 1 页
-[2] done  → 已将 add 改为返回 a+b+1
-任务结束（2 步，累计 1777 tokens）
+你 > 记住，dya 星期一回来
+A-OS > 好，记住了。周一不给你排事。
+
+（十几轮之后，中间聊过别的）
+
+你 > dya 什么时候回来
+A-OS > 星期一。
 ```
 
-## 集群模式
+内核在下面跑，日志在文件里，界面只有对话。想看机制，终端 `/state` 或网页右上角 `⋯`。
 
-```bash
-# 起两个 worker
-systemctl start aos-worker@w1 aos-worker@w2
+## 总览
 
-# 提交任务
-python3 -m cluster.submit "在工作目录创建 done.txt"
+```
+用户说话
+  ↓
+IO 事件 → 调度器（每回合一个任务，并发上限 3）
+  ↓
+状态树：这一轮做到哪了（抽象状态，不是原始 JSON）
+  ↓
+段页式上下文（SYSTEM / HUMAN / DAG_STATE / DATA，预算 8000 token）
+  ↓
+模型
+  ├─ 直接说话 ────────────────→ 回复用户
+  ├─ <|PAGE_FAULT: 目标|> ────→ 缺页：磁盘 / 语义索引 / 长期记忆
+  └─ {"tool": ...} ──────────→ 工具：文件 / 搜索 / 网页
+  ↓
+看门狗：重复动作、步数上限、空转
+  ↓
+回答入页（DAG_STATE）→ 下一轮还在
+  ↓
+后台：抽长期记忆、归档旧对话
 ```
 
-两个任务并行跑，互不抢锁；同一文件被两个 worker 同时写时，Redis 锁会串行化。
+## 机制
 
-## 环境变量
+### 分页与分段
 
-| 变量 | 默认 | 说明 |
+`kernel/page_table.py`，落盘在 `pages.db`：
+
+| 段 | 内容 | 策略 |
 |---|---|---|
-| `AOS_HOME` | `/opt/aos/data` | 状态目录（db、工作区、锁） |
-| `AOS_MAX_ROUNDS` | 6 | 单任务最大轮次 |
-| `AOS_CTX_BUDGET` | 8000 | 上下文 token 预算 |
-| `AOS_OUT_TOKENS` | 3000 | 单次输出上限 |
-| `DEEPSEEK_API_KEY` | — | 模型 key |
+| SYSTEM | 人格、工具协议、时间 | 常驻，永不换出 |
+| HUMAN | 当前人类指令 | 本轮必带 |
+| DAG_STATE | 最近几轮对话、任务状态 | 常驻，超过 6 页降级 |
+| DATA | 文件片段、长期记忆、旧对话 | 按分数换入换出 |
 
-## 已知边界
+- 一页不是定长行，而是一个语义块（文件片段 / 一条记忆 / 一轮对话）。
+- `compose()` 每次重新拼：固定段 + 常驻页 + DATA 里按 `相似度 + 字面重合 + 新鲜度 + 重要度` 选的 Top-K。
+- **总预算硬约束**：固定段和常驻页先扣，剩下的才给 DATA；超了就从低分页换出，不整段清空。
+- 旧对话不会每轮被清掉：上一轮的 HUMAN 降成 DAG_STATE，更旧的降成 DATA，相关时还能被召回。
 
-- 沙盒是命令白名单，不是真隔离；真要隔离得上容器
-- Worker 之间没有共享状态，跨机靠 Redis，但页表不共享
-- 向量检索是暴力余弦，万级以内够用，再大需要索引结构
-- 崩溃恢复只覆盖任务级，不覆盖正在跑的模型调用
+### 缺页中断
 
-## 许可
+模型不知道文件内容时，不猜，输出：
 
-MIT
+```
+<|PAGE_FAULT: login.md|>
+<|PAGE_FAULT: 上次说的那个登录接口|>
+```
+
+内核按顺序找：
+
+1. 工作区文件 → 直接读；
+2. 同一 source 的页已在内存 → 只 `swap_in`，不重复建页；
+3. 自然语言 → 工作区向量索引 + 长期记忆召回，命中的片段建成 DATA 页。
+
+没有 `read` 工具：读文件内容一律走缺页，这样"什么时候换、换多少"由内核预算决定，而不是模型一次性把整份文件倒进上下文。
+
+换入的页本轮钉在 `must_include` 里，不会再被同轮淘汰。文件改过 → 依赖页 `stale`，下次重新换入。缺页次数会记在状态和调试面板里。
+
+### 状态树
+
+`kernel/state_dag.py`，落盘在 `dag.db`：
+
+- 每个节点是**抽象状态**：`用户：…`、`已换入 login.md`、`web_search "…" → 命中 3 条`、`回答：…`。
+- 不存原始 JSON，不存完整文件内容。
+- 每步 checkpoint；`prune()` 成功后归档旁支，只留主干。
+- 上下文里的「最近状态」就是这个主干，不是一整段聊天记录。
+
+### 看门狗
+
+`kernel/progress.py`：
+
+- 同一个缺页目标 / 同一个工具连续 3 次 → 注入中断，要求换目标或直接回答；
+- 步数到 8 → 强制收尾，让模型用一两句话回答；
+- 只提醒和叫停，不再"第一次 write 就逼 done"。
+
+### 调度与恢复
+
+- `kernel_scheduler.py`：优先级队列 + 最大并发 3 + 可取消；每个用户回合是一个任务。
+- `journal.py`：任务租约、断点、重启恢复。重启时未完成的任务标记失败，不会假装续跑。
+- `executor` / `tools.py`：文件路径锁在工作区，写文件原子替换，写完让相关页失效。
+
+### 长期记忆
+
+`kernel/memory.py`，`brain.db`：
+
+- 六类：`identity / preference / fact / plan / episode / summary`。
+- 每轮后台静默提取；重复的按向量相似度合并。
+- 召回打分：`0.58*向量 + 0.14*字面 + 0.08*新鲜度 + 0.20*重要度 + 稀有片段加成`，MMR 去重。
+- 身份/偏好每轮固定带上；其余按需变成 DATA 页换入。
+- **库里的记忆不删**。放不进上下文的只是"这次不带"。
+
+## 用户看到什么
+
+终端：
+
+```
+A-OS 在。
+你 > 我 plan.md 里写了什么？
+本周就两件事：周三评审接口，周五交周报。周一空着，正好。
+```
+
+网页是一个聊天窗口，没有状态树、页表、token 计数。右上角 `⋯` 是维护者抽屉，才看得到：
+
+```
+状态树 12 节点 · 成功 8
+页表 活跃 5 / 换出 7
+缺页 1   本轮步数 3
+```
+
+终端命令：
+
+```
+/state    内核状态（状态树 / 页表 / 缺页）
+/memory   记忆条数与最近几条
+/debug    内部日志开关（默认写 logs/aos.log）
+/reset    换新话题（记忆保留）
+/quit     退出
+```
+
+## 跑起来
+
+```bash
+pip install -r requirements.txt
+cd /opt/aos
+python3 main.py                    # 终端
+python3 main.py --web --port 8799  # 网页
+```
+
+可选：把 `bge-small-zh-v1.5` 放到 `models/bge-small-zh/`（`model.onnx` + `tokenizer.json`），语义召回更准；没有这个目录会自动退化成哈希编码，功能不断。
+
+模型 Key 读 `DEEPSEEK_API_KEY` 或 `~/.dsh/.env`。
+
+## 配置
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `AOS_HOME` | `/opt/aos/data` | 数据、页表、工作区 |
+| `AOS_CTX_BUDGET` | `8000` | 上下文 token 预算 |
+| `AOS_MODEL` | `auto` | `offline` 强制离线 |
+| `AOS_DEBUG` | 空 | 内部日志同时打终端 |
+| `DEEPSEEK_API_KEY` | 读 `~/.dsh/.env` | 模型 Key |
+
+```
+data/
+  brain.db     记忆 + 对话
+  pages.db     页表
+  dag.db       状态树
+  tasks.db     任务日志/租约
+  chunks.db    工作区文件向量索引
+  workspace/   它能读写的文件
+  logs/aos.log 内部日志
+```
+
+## 代码结构
+
+```
+kernel/
+  agent.py            回合：调度 → 组页 → 模型 → 缺页/工具 → 看门狗 → 落页
+  page_table.py       分页 / 分段 / 换入换出 / compose
+  state_dag.py        状态树
+  progress.py         看门狗
+  kernel_scheduler.py 调度器
+  journal.py          租约与恢复
+  memory.py           长期记忆
+  dialogue.py         全量对话史
+  tools.py            文件 / 搜索 / 网页
+  memindex.py         工作区文件切块与语义索引
+  persona.py          提示词
+  tokens.py           token 估算
+web/
+  server.py           聊天接口 + 调试接口
+  index.html          聊天界面（调试抽屉默认收起）
+main.py               入口
+tests/
+  test_chat.py        17 个用例
+  smoke_live.py       真实模型冒烟
+```
+
+## 测试
+
+```bash
+cd /opt/aos
+python3 -m unittest tests.test_chat -v
+```
+
+覆盖：
+
+- 分页 / 分段 / 预算 / 换出
+- `_persist` 真的更新 `segment/source/stale`（旧版这里漏了，重启会复活）
+- 缺页换入文件、同一个 source 去重、文件改过后旧页失效
+- 状态树节点与最近对话页
+- 看门狗拦住重复缺页
+- 记忆写入/召回/去重、300 条重启后还在
+- 20 轮后上下文仍在预算内
+- 工具调用不出现在回答里
+- CLI 不打印内核日志
+- Web 页面与接口
+
+真实模型冒烟：
+
+```bash
+python3 tests/smoke_live.py
+```
+
+## 设计取舍
+
+上一版有两个极端：内核日志直接糊在用户脸上；或者干脆不要内核、退化成聊天 loop。这一版把两件事分开：
+
+- **机制保留**：分页、分段、缺页、状态树、看门狗、调度、租约都还在，而且真的在链路上起作用。
+- **呈现收起来**：正常对话只输出回答；机制进日志和调试面板。
+
+页表这一层也修了上一版的硬伤：`compose` 不再把没选中的 DATA 全换出；缺页按 `source` 去重；`segment/source/stale` 会落库；token 按中文实际字数估，不再 `len/3` 低估三倍。

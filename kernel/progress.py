@@ -1,98 +1,55 @@
-"""进度看门狗与动作台账。
+"""看门狗：盯空转、重复和超步数。
 
-三件事：
-1. 记最近的动作，检测重复
-2. 生成极简台账（给模型看它做过什么，不占上下文）
-3. 读配额：只读不写超过阈值就催它落盘
+它只负责"提醒 + 叫停"，不再强迫模型在第一次 write 后立刻 done。
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
 
 @dataclass
 class ProgressTracker:
-    read_quota: int = 6
-    repeat_threshold: int = 2
+    max_steps: int = 8
+    repeat_threshold: int = 3
     steps: list[tuple[str, str]] = field(default_factory=list)
-    read_paths: list[str] = field(default_factory=list)
-    list_paths: list[str] = field(default_factory=list)
-    writes: int = 0
-    verified: bool = False
-    _last_msg: str | None = None
+    faults: int = 0
+    tools: int = 0
+    _last_nudge: str | None = None
 
-    # ---------- 记录 ----------
-
-    def observe(self, name: str, args: dict, ok: bool) -> None:
-        target = str(args.get("path") or args.get("keyword") or "")
+    def observe(self, name: str, args: dict, ok: bool = True) -> None:
+        target = str(
+            args.get("path") or args.get("query") or args.get("url")
+            or args.get("keyword") or args.get("target") or ""
+        )
         self.steps.append((name, target))
-        if not ok:
-            return
-        if name == "read":
-            if target not in self.read_paths:
-                self.read_paths.append(target)
-            elif self.writes:
-                self.verified = True
-        if name == "list" and target not in self.list_paths:
-            self.list_paths.append(target)
-        if name == "write":
-            self.writes += 1
-            self.verified = False
+        if name == "fault":
+            self.faults += 1
+        elif name not in ("say", "answer"):
+            self.tools += 1
 
-    # ---------- 拦截 ----------
-
-    def blocks_read(self, path: str) -> str | None:
-        if path in self.read_paths and not self.writes:
-            return "这个文件本轮已经读过，内容在盘外。请用 write 把结论落盘，别重复读"
-        return None
-
-    def blocks_list(self, path: str) -> str | None:
-        return "项目结构已经常驻在上下文里，不用再 list。直接 read 或 write。"
-
-    def read_quota_exceeded(self) -> bool:
-        return len(self.read_paths) >= self.read_quota and self.writes == 0
-
-    # ---------- 干预 ----------
+    def exhausted(self, step: int) -> bool:
+        return step >= self.max_steps
 
     def intervention(self) -> str | None:
         msg = self._intervention()
-        if msg == self._last_msg:
+        if msg == self._last_nudge:
             return None
-        self._last_msg = msg
+        self._last_nudge = msg
         return msg
 
     def _intervention(self) -> str | None:
-        if self.read_quota_exceeded():
-            return ("[系统中断] 你已经读了 "
-                    f"{len(self.read_paths)} 个文件却一个字没写。read/list 已禁用，"
-                    "立刻用 write 输出成果，或输出 done。")
-
-        if self.writes and self.verified:
-            return "[系统中断] 文件已写完并自检过，现在必须输出 done，不要再读再列。"
-
-        if self.writes and not self.verified:
-            return "[系统中断] 已经开始产出。最多再 read 自检一次，然后必须 done。"
-
         tail = self.steps[-self.repeat_threshold:]
         if len(tail) == self.repeat_threshold and len(set(tail)) == 1:
             name, target = tail[0]
-            return (f"[系统中断] 你连续 {self.repeat_threshold} 次在做同一件事："
-                    f"{name} {target}。换一个动作，或直接 write / done。")
+            return (f"[系统中断] 「{target or name}」这一步已经重复 "
+                    f"{self.repeat_threshold} 次，换目标或直接回答。")
+        if len(self.steps) >= self.max_steps - 1:
+            return "[系统中断] 步数快到上限了，现在直接用一句话回答用户。"
         return None
 
     def allow(self, name: str) -> bool:
-        if name in ("read", "list") and self.read_quota_exceeded():
-            return False
         return True
 
-    # ---------- 台账 ----------
-
     def ledger(self) -> str:
-        data = {
-            "read": self.read_paths[-8:],
-            "writes": self.writes,
-            "steps": len(self.steps),
-        }
-        return json.dumps(data, ensure_ascii=False)
+        return f"steps={len(self.steps)} faults={self.faults} tools={self.tools}"

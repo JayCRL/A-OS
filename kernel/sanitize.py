@@ -42,12 +42,18 @@ def summarize(action: str, args: dict, ok: bool, observation: str) -> str:
     if action == "shell":
         cmd = str(args.get("cmd", ""))[:40]
         return f"已执行命令 `{cmd}`（成功）" if ok else f"命令 `{cmd}` 失败：{obs}"
+    if action == "read":
+        return f"已读 {path}（{len(observation or '')} 字符）" if ok else f"读 {path} 失败：{obs}"
     if action == "list":
-        return f"已列出目录 {path or '.'}：{obs[:80]}"
+        return f"已列出目录 {path or '.'}"
     if action == "search":
-        return f"已检索「{path}」：{obs[:80]}"
+        return f"已检索「{path}」"
+    if action == "web_search":
+        return f"已搜索「{args.get('query')}」"
+    if action == "web_fetch":
+        return f"已打开 {args.get('url')}"
     if action == "mcp":
-        return f"已调用 {args.get('server')}.{args.get('tool')}：{obs[:80]}"
+        return f"已调用 {args.get('server')}.{args.get('tool')}"
     if action == "fault":
         return f"已换入 {path}"
     if action == "done":
