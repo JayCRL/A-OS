@@ -165,6 +165,11 @@ class PageTable:
         seg = Segment(segment) if isinstance(segment, str) else segment
         if seg in (Segment.SYSTEM, Segment.HUMAN, Segment.DAG_STATE):
             pinned = True
+        from kernel.sanitize import strip_json
+
+        content = strip_json(content)
+        if not content:
+            content = "（空）"
         page = Page(
             page_id=0,
             content=content,
@@ -253,6 +258,17 @@ class PageTable:
             self._persist(page)
         return self.add(f"历史摘要：{text[:200]}", importance=0.4, tag="summary")
 
+    def swap_out_segment(self, segment: Segment) -> int:
+        """整段换出（用于新意图与代码无关时清空 DATA 段）。"""
+
+        count = 0
+        for page in self._pages.values():
+            if page.segment is segment and page.state is PageState.ACTIVE and not page.pinned:
+                page.state = PageState.SWAPPED
+                self._persist(page)
+                count += 1
+        return count
+
     def invalidate_source(self, source: str) -> int:
         """源文件变了：相关页标记 stale 并换出，下次查询重新取。"""
 
@@ -264,6 +280,14 @@ class PageTable:
                 self._persist(page)
                 count += 1
         return count
+
+    def drop(self, page_id: int) -> bool:
+        page = self._pages.pop(page_id, None)
+        if page is None:
+            return False
+        self._conn.execute("DELETE FROM pages WHERE page_id=?", (page_id,))
+        self._conn.commit()
+        return True
 
     def stale_sources(self) -> list[str]:
         return sorted({p.source for p in self._pages.values() if p.stale and p.source})

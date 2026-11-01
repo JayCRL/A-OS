@@ -28,6 +28,7 @@ from kernel.shell_sandbox import ShellSandbox
 from kernel.depgraph import DepGraph
 from kernel.lock import PathLocks
 from kernel.memindex import MemoryIndex
+from kernel import sanitize
 from drivers.mcp_client import McpRegistry
 from kernel.progress import ProgressTracker
 from kernel.journal import Journal
@@ -75,6 +76,7 @@ class AOS:
             self.emit(f"MCP 已挂载：{', '.join(started)}")
         if self._head is None:
             self._head = self.dag.add("系统就绪", kind="boot")
+        self._sanitize_pages()
         self._migrate_vectors()
         indexed = self.memindex.refresh()
         if indexed:
@@ -82,6 +84,29 @@ class AOS:
         self._recover()
         self.emit(f"boot: 节点 {self._head.node_id}，页 {self.mmu.stats()['pages']} 条，"
                   f"模型 {'在线' if self.kernel.ready else '离线'}，编码器 {self.encoder.name}({self.encoder.dim}d)")
+
+    def _sanitize_pages(self) -> None:
+        """一次性清洗历史页里残留的 JSON 日志。"""
+
+        fixed = 0
+        for page in list(self.mmu._pages.values()):
+            raw = page.content
+            clean = sanitize.strip_json(raw)
+            if clean and clean != raw:
+                page.content = clean[:1500]
+                self.mmu._persist(page)
+                fixed += 1
+        dropped = 0
+        for page in list(self.mmu._pages.values()):
+            text = page.content.replace("人类指令：", "").strip()
+            if page.segment is Segment.DATA and len(text) <= 12 and page.tag in ("interrupt", "summary"):
+                self.mmu.drop(page.page_id)
+                dropped += 1
+
+        if fixed:
+            self.emit(f"[净化] 清理 {fixed} 页里的原始指令日志", cls="sys")
+        if dropped:
+            self.emit(f"[净化] 丢弃 {dropped} 页闲聊垃圾", cls="sys")
 
     def _recover(self) -> None:
         pending = self.journal.recover()
@@ -169,6 +194,13 @@ class AOS:
                 self.mmu._persist(old)
         page = self.mmu.add(f"人类指令：{event.summary}", importance=1.0,
                             tag="interrupt", segment=Segment.HUMAN)
+
+        if sanitize.needs_code(event.summary):
+            self.mmu.swap_in(0) if False else None
+        else:
+            cleared = self.mmu.swap_out_segment(Segment.DATA)
+            if cleared:
+                self.emit(f"[清段] 本轮与代码无关，DATA 段换出 {cleared} 页", cls="sys")
 
         task_id = self.journal.register(event.summary, node.node_id)
         self.journal.claim(task_id)
@@ -265,7 +297,8 @@ class AOS:
                 self.emit(f"[看门狗] {nudge[:60]}")
 
             step_node = self.dag.add(
-                f"{action.name}: {str(obs)[:200]}", parent_id=current.node_id, kind="act"
+                sanitize.summarize(action.name, action.args, obs.ok, str(obs)),
+                parent_id=current.node_id, kind="act",
             )
             current = step_node
             self._head = current
@@ -389,7 +422,8 @@ class AOS:
         content = "# " + summary[:20].strip("。") + "\n\n" + "\n\n".join(parts) + "\n"
         target = self.executor.root / "README.md"
         target.write_text(content, encoding="utf-8")
-        self.mmu.add(content[:1200], importance=0.9, tag="deliverable", segment=Segment.DAG_STATE)
+        self.mmu.add(sanitize.strip_json(content)[:1200], importance=0.9,
+                     tag="deliverable", segment=Segment.DAG_STATE)
 
         done_node = self.dag.add(f"README.md 完成（{len(content)} 字符）", parent_id=node.node_id, kind="done")
         self._head = done_node
@@ -417,7 +451,7 @@ class AOS:
     def snapshot(self) -> dict:
         nodes = sorted(self.dag._nodes.values(), key=lambda n: n.node_id)[-40:]
         order = {"system": 0, "human": 1, "dag": 2, "data": 3}
-        pages = sorted(self.mmu._pages.values(),
+        pages = sorted((p for p in self.mmu._pages.values() if p.state.value == "active"),
                        key=lambda p: (order.get(p.segment.value, 9), -p.page_id))[:30]
         return {
             "dag": [{"id": n.node_id, "pid": n.parent_id, "kind": n.kind,
