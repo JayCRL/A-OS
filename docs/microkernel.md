@@ -112,6 +112,7 @@ mk.ask("继续搞登录页")
 ```
 
 - 一个会话进程是常驻 loop：收到消息 `running`，空闲 `waiting`；
+- 会话 loop 是独立 asyncio task，不占调度 worker；真正跑一轮时才占用 turn 信号量（并发 3），所以 12 个空闲会话也不会把后续进程卡在 ready；
 - 同一会话共用一个 pid，HUMAN/DAG/DATA 页天然连续；
 - 会话 30 分钟无输入过期，进程收 None 退出；
 - 旧会话的工作集按 `_reap_old_pids` 降温，再回来时用最近 8 轮兜底。
@@ -202,7 +203,7 @@ python3 -m unittest tests.test_microkernel -v
 python3 tests/mk_demo.py
 ```
 
-19 个微内核用例：
+20 个微内核用例：
 
 - 启动/服务注册/内核 state
 - 未知服务
@@ -222,11 +223,12 @@ python3 tests/mk_demo.py
 - split 模式：三个独立进程、远程 pager/librarian/vfs 流程
 - 跨进程上下文：第二个 pid 能看到上一轮回答
 - Dispatcher 复用：第二轮"要"命中同一个 pid，prompt 带上一轮回答
+- 12 个空闲会话不阻塞后续消息
 
 全量：
 
 ```
-Ran 44 tests in 16.8s
+Ran 45 tests in 27.4s
 OK
 ```
 
