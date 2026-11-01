@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from kernel.io_spooler import ActionKind, HumanAction, IOSpooler, InterruptEvent
 from kernel.kernel_scheduler import Job, KernelScheduler
-from kernel.page_table import PageTable
+from kernel.page_table import PageTable, Segment
 from kernel.state_dag import NodeStatus, StateDAG
 from drivers.model import DeepSeekKernel, OfflineKernel
 from drivers import protocol
@@ -162,8 +162,13 @@ class AOS:
             node = self.dag.add(event.summary, parent_id=self._head.node_id if self._head else None,
                                 kind="goal" if self._head is None else "step")
         self._head = node
-        page = self.mmu.add(f"人类指令：{event.summary}", importance=1.0, tag="interrupt", pinned=True)
-        self.mmu.unpin(page.page_id)  # 只在本轮钉住
+        for old in list(self.mmu._pages.values()):
+            if old.segment is Segment.HUMAN:
+                old.segment = Segment.DATA
+                old.pinned = False
+                self.mmu._persist(old)
+        page = self.mmu.add(f"人类指令：{event.summary}", importance=1.0,
+                            tag="interrupt", segment=Segment.HUMAN)
 
         task_id = self.journal.register(event.summary, node.node_id)
         self.journal.claim(task_id)
@@ -187,25 +192,29 @@ class AOS:
         self.executor.guard = guard
 
         for rnd in range(start_round + 1, self.max_rounds + 1):
-            header = (f"任务目标：{summary}\n"
-                      f"文件树（已缓存，别 list）：\n{self._tree()}\n"
-                      f"依赖（谁 import 谁）：\n{self.depgraph.render(limit=8)}\n"
-                      f"台账：{guard.ledger()}")
+            sections = {
+                "system": protocol.SYSTEM,
+                "human": f"任务目标：{summary}",
+                "dag": (f"文件树：\n{self._tree()}\n"
+                        f"依赖：\n{self.depgraph.render(limit=8)}\n"
+                        f"台账：{guard.ledger()}\n"
+                        f"最近路径：\n{self.dag.render(limit=4)}"),
+            }
             prompt, pages = self.mmu.compose(
                 query_vec=self._vec(summary),
                 budget_tokens=self.budget,
-                header=header,
+                segments=sections,
             )
             if trace:
                 prompt += "\n\n最近两步：\n" + "\n".join(trace[-2:])
 
             action = None
             fault_targets: list[str] = []
+            fault_seen: set[str] = locals().get("fault_seen") or set()
             out_tokens = int(os.environ.get("AOS_OUT_TOKENS", "3000"))
             for attempt in range(2):
                 raw = await self.kernel.chat(
                     [
-                        {"role": "system", "content": protocol.SYSTEM},
                         {"role": "user", "content": prompt + (
                             "\n[系统] 上一次输出被截断或不是合法 JSON。这次要么用 append 分块写，"
                             "要么只输出一个短 JSON。" if attempt else "")},
@@ -227,7 +236,7 @@ class AOS:
                     break
                 self.emit(f"[重试] 输出不合法，第 {attempt + 2} 次")
             if fault_targets:
-                await self._page_fault(fault_targets, guard)
+                await self._page_fault(fault_targets, guard, fault_seen)
                 continue
 
             if action is None:
@@ -279,16 +288,28 @@ class AOS:
         u = self.kernel.usage
         self.emit(f"任务结束（{len(trace)} 步，累计 {u.total} tokens）")
 
-    async def _page_fault(self, targets: list[str], guard) -> None:
+    async def _page_fault(self, targets: list[str], guard, seen: set[str] | None = None) -> None:
         """缺页中断：把目标文件换入内存，LRU 自动踢掉最老的页。"""
 
+        seen = seen if seen is not None else set()
         for target in targets[:3]:
+            key = target.strip().lower()
+            if key in seen:
+                self.emit(f"[缺页] {target} 本轮已寻过，跳过（换个文件或直接动手）", cls="err")
+                continue
+            seen.add(key)
+
+            looks_like_path = ("." in target or "/" in target) and " " not in target
             active = [p for p in self.mmu._pages.values()
                       if p.source == target and p.state.value == "active" and not p.stale]
             if active:
                 self.emit(f"[缺页] {target} 已在内存（页 #{active[0].page_id}），不重复换入", cls="sys")
                 continue
             obs = self.executor.read_internal(target)
+            if not obs.ok and looks_like_path:
+                hits = []
+                self.emit(f"[缺页] 文件不存在：{target}（不猜，换目标或动手）", cls="err")
+                continue
             if not obs.ok:
                 hits = self.memindex.query(target, k=2)
                 hits = [h for h in hits if h.score > 0.35]
@@ -345,9 +366,9 @@ class AOS:
         for idx, sec in enumerate(sections, 1):
             tail = parts[-1][-300:] if parts else ""
             prompt = (
-                f"任务：{summary}\n"
-                f"大纲：{' / '.join(sections)}\n"
-                f"上文结尾：{tail}\n\n"
+                f"【系统段】{protocol.SYSTEM}\n\n"
+                f"【人类指令段】任务：{summary}\n"
+                f"【状态段】大纲：{' / '.join(sections)}\n上文结尾：{tail}\n\n"
                 f"现在只写第 {idx} 节「{sec}」，用 Markdown 二级标题开头，写满 400 字以上，"
                 "给代码细节，不要空话，不要写其他章节。"
             )
@@ -368,7 +389,7 @@ class AOS:
         content = "# " + summary[:20].strip("。") + "\n\n" + "\n\n".join(parts) + "\n"
         target = self.executor.root / "README.md"
         target.write_text(content, encoding="utf-8")
-        self.mmu.add(content[:1200], importance=0.9, tag="deliverable")
+        self.mmu.add(content[:1200], importance=0.9, tag="deliverable", segment=Segment.DAG_STATE)
 
         done_node = self.dag.add(f"README.md 完成（{len(content)} 字符）", parent_id=node.node_id, kind="done")
         self._head = done_node
@@ -395,13 +416,15 @@ class AOS:
 
     def snapshot(self) -> dict:
         nodes = sorted(self.dag._nodes.values(), key=lambda n: n.node_id)[-40:]
-        pages = sorted(self.mmu._pages.values(), key=lambda p: p.page_id)[-30:]
+        order = {"system": 0, "human": 1, "dag": 2, "data": 3}
+        pages = sorted(self.mmu._pages.values(),
+                       key=lambda p: (order.get(p.segment.value, 9), -p.page_id))[:30]
         return {
             "dag": [{"id": n.node_id, "pid": n.parent_id, "kind": n.kind,
                      "status": n.status.value, "text": n.content[:80]} for n in nodes],
             "pages": [{"id": p.page_id, "preview": p.content[:60].replace("\n", " "),
                        "source": p.source, "stale": p.stale, "pinned": p.pinned,
-                       "state": p.state.value}
+                       "state": p.state.value, "segment": p.segment.value}
                       for p in pages],
             "log": self.log[-120:],
             "tokens": self.kernel.usage.total,

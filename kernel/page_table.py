@@ -15,6 +15,13 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 
+class Segment(str, Enum):
+    SYSTEM = "system"      # 宪法、工具定义：最高特权，永不换出
+    HUMAN = "human"        # 人类指令：本轮必带
+    DAG_STATE = "dag"      # 任务状态：常驻
+    DATA = "data"          # 代码/文档：可淘汰
+
+
 class PageState(str, Enum):
     ACTIVE = "active"        # 常驻热层
     SWAPPED = "swapped_out"  # 已换出，正文在冷层
@@ -35,6 +42,7 @@ class Page:
     tokens: int = 0
     source: str = ""
     stale: bool = False
+    segment: Segment = Segment.DATA
 
     def __post_init__(self) -> None:
         if not self.tokens:
@@ -76,20 +84,33 @@ class PageTable:
                 tag         TEXT NOT NULL DEFAULT '',
                 tokens      INTEGER NOT NULL DEFAULT 0,
                 source      TEXT NOT NULL DEFAULT '',
-                stale       INTEGER NOT NULL DEFAULT 0
+                stale       INTEGER NOT NULL DEFAULT 0,
+                segment     TEXT NOT NULL DEFAULT 'data' 
             )
             """
         )
+        self._migrate()
         self._conn.commit()
         self._load()
         self._enforce_capacity()
+
+    def _migrate(self) -> None:
+        """老库补列，避免升级后直接崩。"""
+
+        cols = {row[1] for row in self._conn.execute("PRAGMA table_info(pages)")}
+        for name, decl in (("source", "TEXT NOT NULL DEFAULT ''"),
+                           ("stale", "INTEGER NOT NULL DEFAULT 0"),
+                           ("segment", "TEXT NOT NULL DEFAULT 'data'")):
+            if name not in cols:
+                self._conn.execute(f"ALTER TABLE pages ADD COLUMN {name} {decl}")
+        self._conn.commit()
 
     # ---------- 持久化 ----------
 
     def _load(self) -> None:
         rows = self._conn.execute(
             "SELECT page_id, content, state, pinned, importance, refs,"
-            " created_at, last_used, vec, tag, tokens, source, stale FROM pages"
+            " created_at, last_used, vec, tag, tokens, source, stale, segment FROM pages"
         ).fetchall()
         for r in rows:
             self._pages[r[0]] = Page(
@@ -106,13 +127,14 @@ class PageTable:
                 tokens=r[10],
                 source=r[11] if len(r) > 11 else "",
                 stale=bool(r[12]) if len(r) > 12 else False,
+                segment=Segment(r[13]) if len(r) > 13 else Segment.DATA,
             )
 
     def _persist(self, page: Page) -> None:
         self._conn.execute(
             "INSERT INTO pages (page_id, content, state, pinned, importance, refs,"
-            " created_at, last_used, vec, tag, tokens, source, stale)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " created_at, last_used, vec, tag, tokens, source, stale, segment)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(page_id) DO UPDATE SET content=excluded.content,"
             " state=excluded.state, pinned=excluded.pinned,"
             " importance=excluded.importance, refs=excluded.refs,"
@@ -122,7 +144,7 @@ class PageTable:
                 page.page_id, page.content, page.state.value, int(page.pinned),
                 page.importance, page.refs, page.created_at, page.last_used,
                 json.dumps(page.vec) if page.vec else None, page.tag, page.tokens,
-                page.source, int(page.stale),
+                page.source, int(page.stale), page.segment.value,
             ),
         )
         self._conn.commit()
@@ -138,7 +160,11 @@ class PageTable:
         tag: str = "",
         pinned: bool = False,
         source: str = "",
+        segment: Segment | str = Segment.DATA,
     ) -> Page:
+        seg = Segment(segment) if isinstance(segment, str) else segment
+        if seg in (Segment.SYSTEM, Segment.HUMAN, Segment.DAG_STATE):
+            pinned = True
         page = Page(
             page_id=0,
             content=content,
@@ -147,16 +173,17 @@ class PageTable:
             tag=tag,
             pinned=pinned,
             source=source,
+            segment=seg,
         )
         cur = self._conn.execute(
             "INSERT INTO pages (content, state, pinned, importance, refs,"
-            " created_at, last_used, vec, tag, tokens, source, stale)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+            " created_at, last_used, vec, tag, tokens, source, stale, segment)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 page.content, page.state.value, int(page.pinned), page.importance,
                 0, page.created_at, page.last_used,
                 json.dumps(page.vec) if page.vec else None, page.tag, page.tokens,
-                page.source, int(page.stale),
+                page.source, int(page.stale), page.segment.value,
             ),
         )
         self._conn.commit()
@@ -168,7 +195,9 @@ class PageTable:
     def _enforce_capacity(self) -> list[int]:
         """活跃页超过上限，把最久没用且没钉住的换出去。"""
 
-        active = [p for p in self._pages.values() if p.state is PageState.ACTIVE and not p.pinned]
+        active = [p for p in self._pages.values()
+                  if p.state is PageState.ACTIVE and not p.pinned
+                  and p.segment is Segment.DATA]
         if len(active) <= self.max_active:
             return []
         active.sort(key=lambda p: p.last_used)
@@ -272,11 +301,14 @@ class PageTable:
         *,
         query_vec: Sequence[float] | None = None,
         only_active: bool = False,
+        segment: Segment | None = None,
     ) -> list[tuple[float, Page]]:
         now = time.time()
         pool: Iterable[Page] = self._pages.values()
         if only_active:
             pool = [p for p in pool if p.state is PageState.ACTIVE]
+        if segment is not None:
+            pool = [p for p in pool if p.segment is segment]
         scored = [(self.score(p, query_vec=query_vec, now=now), p) for p in pool]
         scored.sort(key=lambda x: (x[1].pinned, x[0]), reverse=True)
         return scored
@@ -288,48 +320,63 @@ class PageTable:
         *,
         query_vec: Sequence[float] | None = None,
         budget_tokens: int = 6000,
-        header: str = "",
-        footer: str = "",
-        header_tokens: int = 0,
-        footer_tokens: int = 0,
+        segments: dict[str, str] | None = None,
         top_k: int | None = None,
     ) -> tuple[str, list[int]]:
-        """按预算组装上下文，超出的页换出。返回 (prompt, 页号列表)。"""
+        """段页式组装：固定段在前，DATA 段按相似度取 Top-K。
 
-        available = max(0, budget_tokens - header_tokens - footer_tokens)
-        chosen: list[Page] = []
-        used = 0
+        segments: {"system": 文本, "human": 文本, "dag": 文本}，按此顺序拼接。
+        """
 
+        segments = segments or {}
         limit = self.top_k if top_k is None else top_k
+
+        data_pages: list[Page] = []
         picked = 0
-        for _, page in self.ranked(query_vec=query_vec):
-            if page.stale and not page.pinned:
+        used = 0
+        budget = budget_tokens
+
+        for _, page in self.ranked(query_vec=query_vec, only_active=True, segment=Segment.DATA):
+            if page.stale or page.pinned:
                 continue
-            if not page.pinned and picked >= limit:
-                continue
-            if not page.pinned:
-                picked += 1
-            if page.pinned:
-                if page.state is PageState.SWAPPED:
-                    self.swap_in(page.page_id)
-                chosen.append(page)
-                used += page.tokens
-                continue
-            if used + page.tokens > available:
+            if picked >= limit or used + page.tokens > budget:
                 if page.state is PageState.ACTIVE:
                     self.swap_out(page.page_id)
                 continue
             if page.state is PageState.SWAPPED:
                 self.swap_in(page.page_id)
-            chosen.append(page)
+            data_pages.append(page)
+            picked += 1
             used += page.tokens
 
-        for page in chosen:
+        resident = [p for p in self._pages.values()
+                    if p.segment in (Segment.SYSTEM, Segment.HUMAN, Segment.DAG_STATE)
+                    and p.state is PageState.ACTIVE]
+
+        for page in data_pages + resident:
             self.touch(page.page_id)
 
-        body = "\n\n".join(f"[p{page.page_id}]{page.content}" for page in chosen)
-        prompt = f"{header}\n{body}\n{footer}".strip()
-        return prompt, [p.page_id for p in chosen]
+        parts: list[str] = []
+        titles = {"system": "系统段", "human": "人类指令段", "dag": "状态段"}
+        for key in ("system", "human", "dag"):
+            body = (segments.get(key) or "").strip()
+            if body:
+                parts.append(f"===【{titles[key]}】===\n{body}")
+            extra = [p for p in resident
+                     if p.segment.value == key and p.content not in body]
+            if extra:
+                merged = "\n".join(f"[p{p.page_id}] {p.content}" for p in extra)
+                if not body:
+                    parts.append(f"===【{titles[key]}】===\n{merged}")
+                else:
+                    parts.append(merged)
+
+        if data_pages:
+            body = "\n\n".join(f"[p{p.page_id}] {p.content}" for p in data_pages)
+            parts.append(f"===【数据段】===\n{body}")
+
+        chosen = [p.page_id for p in data_pages] + [p.page_id for p in resident]
+        return "\n\n".join(parts), chosen
 
     # ---------- 缺页中断 ----------
 

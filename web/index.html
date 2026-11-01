@@ -103,6 +103,14 @@
     transition: border-color .2s, opacity .2s;
   }
   .pg.on { border-color: var(--blue); box-shadow: 0 0 10px -6px var(--blue); }
+  .pg.seg-system { border-color: var(--amber); box-shadow: 0 0 12px -6px var(--amber); }
+  .pg.seg-system .num { color: var(--amber); }
+  .pg.seg-human { border-color: var(--cyan); box-shadow: 0 0 12px -6px var(--cyan); }
+  .pg.seg-human .num { color: var(--cyan); }
+  .pg.seg-dag { border-color: var(--green); }
+  .pg.seg-dag .num { color: var(--green); }
+  .pg .seg { font-size: 9px; letter-spacing: .08em; color: var(--dim);
+             border: 1px solid #223; border-radius: 2px; padding: 0 4px; }
   .pg.stale { opacity: .45; text-decoration: line-through; border-color: #331015; }
   .pg .top { display: flex; gap: 6px; align-items: center; margin-bottom: 3px; }
   .pg .num { color: var(--blue); }
@@ -312,8 +320,9 @@ function render(s) {
   drawGraph(s.dag || []);
 
   el.pages.innerHTML = (s.pages || []).map(p =>
-    `<div class="pg ${(p.stale || p.state === 'swapped_out') ? 'stale' : 'on'}">` +
+    `<div class="pg seg-${esc(p.segment || 'data')} ${(p.stale || p.state === 'swapped_out') ? 'stale' : 'on'}">` +
     `<div class="top"><span class="num">#${p.id}</span>` +
+    `<span class="seg">${esc((p.segment || 'data').toUpperCase())}</span>` +
     `${p.source ? `<span class="src">${esc(p.source)}</span>` : ''}` +
     `${p.pinned ? '<span class="pin">PIN</span>' : ''}</div>` +
     `<div class="txt">${esc(p.preview)}</div></div>`).join('');

@@ -14,7 +14,7 @@ ACTION_NAMES = {"write", "append", "list", "search", "shell", "mcp", "done"}
 SYSTEM = """你是 A-OS 的内核进程，只能通过动作与世界交互。
 
 每轮只输出一个 JSON 对象，不要有任何其他文字：
-{"action": "read|write|list|search|shell|done", ...}
+{"action": "write|append|list|search|shell|mcp|done", ...}
 
 参数：
 - write  {"action":"write","path":"相对路径","content":"内容"}
