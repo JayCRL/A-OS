@@ -27,6 +27,7 @@ from kernel.executor import Executor
 from kernel.shell_sandbox import ShellSandbox
 from kernel.depgraph import DepGraph
 from kernel.lock import PathLocks
+from kernel.memindex import MemoryIndex
 from drivers.mcp_client import McpRegistry
 from kernel.progress import ProgressTracker
 from kernel.journal import Journal
@@ -57,6 +58,7 @@ class AOS:
                                  path_locks=self.path_locks)
         self.max_rounds = int(os.environ.get("AOS_MAX_ROUNDS", "6"))
         self.encoder = load_encoder()
+        self.memindex = MemoryIndex(self.home / "chunks.db", self.encoder, self.home / "workspace")
         self.journal = Journal(self.home / "tasks.db")
         self.broker = None
         self.budget = int(os.environ.get("AOS_CTX_BUDGET", "8000"))
@@ -74,6 +76,9 @@ class AOS:
         if self._head is None:
             self._head = self.dag.add("系统就绪", kind="boot")
         self._migrate_vectors()
+        indexed = self.memindex.refresh()
+        if indexed:
+            self.emit(f"记忆索引：{indexed} 个文件入库 {self.memindex.stats()}")
         self._recover()
         self.emit(f"boot: 节点 {self._head.node_id}，页 {self.mmu.stats()['pages']} 条，"
                   f"模型 {'在线' if self.kernel.ready else '离线'}，编码器 {self.encoder.name}({self.encoder.dim}d)")
@@ -285,6 +290,16 @@ class AOS:
                 continue
             obs = self.executor.read_internal(target)
             if not obs.ok:
+                hits = self.memindex.query(target, k=2)
+                hits = [h for h in hits if h.score > 0.35]
+                if hits:
+                    for h in hits[:1]:
+                        page = self.mmu.add(h.text[:1500], vec=self._vec(h.text[:800]),
+                                            importance=0.9, tag="pagefault", source=h.path)
+                        self.emit(f"[缺页中断] 语义寻址「{target}」→ {h.path}:{h.start} "
+                                  f"(相似度 {h.score:.2f}) → 页 #{page.page_id}", cls="fault")
+                    guard.observe("fault", {"path": target}, True)
+                    continue
                 self.emit(f"[缺页] 寻址失败：{target}", cls="err")
                 continue
             page = self.mmu.add(obs.text[:1500], vec=self._vec(obs.text[:800]),
