@@ -268,6 +268,16 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第一轮：百度热搜有几条", prompt)
         self.assertIn("用户：要", prompt)
 
+    async def test_many_idle_sessions_do_not_block(self) -> None:
+        echo = EchoModel()
+        self.mk.model = echo
+        self.mk.librarian.model = echo
+        for i in range(12):
+            answer = await self.mk.ask(f"独立话题 {i}", channel=f"c{i}")
+            self.assertEqual(answer, "看到图里的内容了。")
+        self.assertGreaterEqual(len(self.mk.table._procs), 12)
+        self.assertEqual(len(self.mk._session_tasks), 12)
+
     async def test_concurrent_asks_have_isolated_segments(self) -> None:
         echo = EchoModel()
         self.mk.model = echo

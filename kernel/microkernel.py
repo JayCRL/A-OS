@@ -54,6 +54,8 @@ class Microkernel:
         self._pager_stats: dict = {"pages": {}, "graph": {}, "memory": {}, "faults": 0}
         self._log_handles: list = []
         self._watch_task: asyncio.Task | None = None
+        self._session_tasks: dict[int, asyncio.Task] = {}
+        self._turn_sem = asyncio.Semaphore(3)
         if split:
             self.bus = None  # boot 时换成 RemoteBus
             self.pager = None
@@ -141,6 +143,10 @@ class Microkernel:
         self._state = "stopping"
         for session in list(self.dispatcher.sessions.values()):
             await session.queue.put(None)
+        for task in list(self._session_tasks.values()):
+            task.cancel()
+        if self._session_tasks:
+            await asyncio.gather(*list(self._session_tasks.values()), return_exceptions=True)
         if self.split:
             try:
                 await self.bus.call("librarian", "flush", timeout=10)
@@ -236,10 +242,12 @@ class Microkernel:
         session, is_new = self.dispatcher.route(text, channel=channel)
         proc = self.table.get(session.pid) if session.pid is not None else None
         if is_new or proc is None or proc.state in (ProcState.DONE, ProcState.KILLED):
-            proc = await self.spawn("session", self._session_loop,
-                                    payload={"session": session})
+            proc = self.table.new("session", payload={"session": session})
             session.pid = proc.pid
             session.created = time.time()
+            self._session_tasks[proc.pid] = asyncio.create_task(
+                self._session_loop(proc), name=f"session:{proc.pid}"
+            )
 
         started = time.time()
         self._history_cache.append({"role": "user", "text": text, "ts": time.time()})
@@ -263,25 +271,32 @@ class Microkernel:
         }
         return answer
 
-    async def _session_loop(self, proc: Process, _kernel) -> None:
+    async def _session_loop(self, proc: Process) -> None:
         from kernel.agent_proc import AgentProcess
 
         session = proc.payload["session"]
         agent = AgentProcess(self)
-        while self._state in ("booting", "running"):
-            self.table.set_state(proc.pid, ProcState.WAITING)
-            item = await session.queue.get()
-            if item is None:
-                break
-            self.table.set_state(proc.pid, ProcState.RUNNING)
-            future = item.get("future")
-            try:
-                answer = await agent.run_turn(proc, str(item.get("text", "")))
-                if future is not None and not future.done():
-                    future.set_result(answer)
-            except Exception as exc:  # noqa: BLE001
-                if future is not None and not future.done():
-                    future.set_exception(exc)
+        try:
+            while self._state in ("booting", "running"):
+                self.table.set_state(proc.pid, ProcState.WAITING)
+                item = await session.queue.get()
+                if item is None:
+                    break
+                self.table.set_state(proc.pid, ProcState.RUNNING)
+                future = item.get("future")
+                try:
+                    async with self._turn_sem:
+                        answer = await agent.run_turn(proc, str(item.get("text", "")))
+                    if future is not None and not future.done():
+                        future.set_result(answer)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    if future is not None and not future.done():
+                        future.set_exception(exc)
+        finally:
+            self.table.set_state(proc.pid, ProcState.DONE)
+            self._session_tasks.pop(proc.pid, None)
 
     async def reply(self, text: str) -> str:
         return await self.ask(text, channel="web")
