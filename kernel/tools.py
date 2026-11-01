@@ -231,6 +231,7 @@ class Tools:
         query = query.strip()
         if not query:
             return "错误：搜索词为空"
+        weather = self._weather_line(query) if any(w in query for w in ("天气", "气温", "下雨", "温度")) else ""
         url = "https://cn.bing.com/search?q=" + urllib.parse.quote(query)
         req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9"})
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -249,8 +250,24 @@ class Tools:
                 snippet = _strip_tags(sm.group(1))
             results.append(f"- {title}\n  {link}\n  {snippet[:220]}")
         if not results:
-            return "搜索没有返回结果"
-        return f"「{query}」的搜索结果：\n" + "\n".join(results)
+            return weather or "搜索没有返回结果"
+        return (weather + "\n\n" if weather else "") + f"「{query}」的搜索结果：\n" + "\n".join(results)
+
+    def _weather_line(self, query: str) -> str:
+        """天气类查询补一条实时数据，避免只搜到百科/旅游攻略。"""
+
+        m = re.search(r"([\u4e00-\u9fff]{2,8}?)(?:今天|明天|的)?天气", query)
+        city = m.group(1) if m else "武汉"
+        try:
+            url = "https://wttr.in/" + urllib.parse.quote(city) + "?format=3&lang=zh"
+            req = urllib.request.Request(url, headers={"User-Agent": "curl/8.0"})
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                line = resp.read(300).decode("utf-8", "ignore").strip().splitlines()[0]
+            if not line or line.startswith("<"):
+                return ""
+            return f"实时天气（wttr.in）：{line}"
+        except Exception:
+            return ""
 
     def _web_fetch(self, url: str) -> str:
         url = url.strip()
