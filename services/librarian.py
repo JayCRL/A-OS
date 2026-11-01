@@ -35,6 +35,21 @@ SYSTEM = """你是 A-OS 的编目器。判断这一轮对话是否属于一个�
 - 不确定就 noise=true，宁可不记，不要造节点"""
 
 
+CONSOLIDATE = """你是记忆巩固器。把下面这段最近的对话压缩成一条可长期检索的摘要，并抽取事实变化。
+
+只输出 JSON：
+{"summary": "120 字以内，保留用户是谁、做了什么决定、还有什么没完成",
+ "facts": [{"text": "第三人称陈述", "kind": "identity|preference|fact|plan", "importance": 0.0}],
+ "supersedes": ["被新说法覆盖的旧事实"],
+ "open_tasks": ["未完成的事"],
+ "topics": ["主题"]}
+
+规则：
+- 摘要不要分点，不要评论，不要用"用户"以外的主语
+- facts 只留以后还用得上的；计划变更写进 supersedes
+- 没有就空数组；不要编"""
+
+
 class LLMExtractor:
     def __init__(self, model) -> None:
         self.model = model
@@ -62,11 +77,13 @@ class LibrarianService:
     name = "librarian"
 
     def __init__(self, graph: GraphStore | None = None, *, model=None,
-                 backend=None, fact_sink=None, project: str = "main") -> None:
+                 backend=None, fact_sink=None, project: str = "main",
+                 summary_every: int = 8) -> None:
         self.graph = graph
         self.model = model
         self.backend = backend
         self.fact_sink = fact_sink
+        self.summary_every = max(2, int(summary_every))
         self.extractor = LLMExtractor(model)
         self.consolidator = Consolidator(graph, project=project) if graph is not None else None
         self.queue: asyncio.Queue = asyncio.Queue()
@@ -74,6 +91,9 @@ class LibrarianService:
         self.processed = 0
         self.skipped = 0
         self.errors = 0
+        self._turns = 0
+        self.summaries = 0
+        self.last_summary = ""
         self.last_error = ""
 
     async def start(self) -> None:
@@ -98,6 +118,8 @@ class LibrarianService:
             "skipped": self.skipped,
             "errors": self.errors,
             "last_error": self.last_error,
+            "summaries": self.summaries,
+            "last_summary": self.last_summary,
             "graph": self.graph.stats() if self.graph is not None else {},
             "remote": self.backend is not None,
         }
@@ -108,6 +130,9 @@ class LibrarianService:
             try:
                 await self._ingest(item)
                 self.processed += 1
+                self._turns += 1
+                if self.summary_every and self._turns % self.summary_every == 0:
+                    await self._consolidate()
             except asyncio.CancelledError:
                 self.queue.task_done()
                 raise
@@ -163,6 +188,41 @@ class LibrarianService:
             await self.backend.call("pager", "commit_episode", **payload)
         else:
             self.skipped += 1
+
+    async def _consolidate(self) -> None:
+        if self.model is None or self.backend is None:
+            return
+        try:
+            history = await self.backend.call("pager", "recent_history", limit=20)
+            if len(history) < 4:
+                return
+            lines = []
+            for turn in history[-20:]:
+                who = "用户" if turn.get("role") == "user" else "助手"
+                lines.append(f"{who}：{str(turn.get('text', ''))[:400]}")
+            reply = await self.model.chat(
+                [{"role": "system", "content": CONSOLIDATE},
+                 {"role": "user", "content": "\n".join(lines)}],
+                max_tokens=420, temperature=0.0,
+            )
+            raw = (reply.text or "").strip()
+            match = re.search(r"\{.*\}", raw, re.S)
+            if not match:
+                return
+            data = json.loads(match.group(0))
+            summary = str(data.get("summary", "")).strip()
+            if summary:
+                await self.backend.call("pager", "commit_summary", text=summary, scope="session")
+                self.summaries += 1
+                self.last_summary = summary[:200]
+            facts = list(data.get("facts") or [])
+            if facts:
+                await self.backend.call("pager", "commit_memory", items=facts)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self.errors += 1
+            self.last_error = f"consolidate: {type(exc).__name__}: {exc}"
 
     async def close(self) -> None:
         await self.queue.join()

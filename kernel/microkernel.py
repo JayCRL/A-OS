@@ -30,9 +30,24 @@ from services.vfs import VFSService
 Routine = Callable[[Process, "Microkernel"], Awaitable[Any]]
 
 
+class _PagerBridge:
+    """同进程模式下给 librarian 的 pager RPC 适配器。"""
+
+    def __init__(self, pager) -> None:
+        self.pager = pager
+
+    async def call(self, service: str, method: str, **params):
+        if service != "pager":
+            raise ValueError(f"不支持的本地服务：{service}")
+        return await self.pager.handle(method, params)
+
+    async def close(self) -> None:
+        return None
+
+
 class Microkernel:
     def __init__(self, home: str | Path = "/opt/aos/data", *, model=None,
-                 encoder=None, split: bool = False) -> None:
+                 encoder=None, split: bool = False, summary_every: int = 8) -> None:
         self.home = Path(home)
         self.home.mkdir(parents=True, exist_ok=True)
         self.split = split
@@ -65,7 +80,10 @@ class Microkernel:
             self.bus = MessageBus()
             self.pager = PagerService(self.home, self.encoder, bus=None)
             self.librarian = LibrarianService(
-                self.pager.graph, model=self.model, fact_sink=self.pager.commit_memory,
+                self.pager.graph, model=self.model,
+                backend=_PagerBridge(self.pager),
+                fact_sink=self.pager.commit_memory,
+                summary_every=summary_every,
             )
             self.vfs = VFSService(self.home, self.encoder)
         self._last: dict = {}

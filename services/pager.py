@@ -33,6 +33,22 @@ class PagerService:
         self.dialogue = Dialogue(self.home / "brain.db", session="main")
         self.faults = 0
         self.consolidator: Consolidator | None = None
+        self.memory._conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS memory_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                pid INTEGER NOT NULL DEFAULT 0,
+                query TEXT NOT NULL DEFAULT '',
+                page_ids TEXT NOT NULL DEFAULT '[]',
+                used_ids TEXT NOT NULL DEFAULT '[]',
+                outcome INTEGER NOT NULL DEFAULT 0,
+                tokens INTEGER NOT NULL DEFAULT 0,
+                latency REAL NOT NULL DEFAULT 0
+            )
+            """
+        )
+        self.memory._conn.commit()
 
     async def boot(self) -> None:
         # 旧版页表里 pid=0 的 HUMAN/DAG/DATA 是历史遗留，不再参与新进程地址空间
@@ -69,6 +85,20 @@ class PagerService:
                                     set(params.get("hot") or []))
         if method == "commit_episode":
             return self.commit_episode(dict(params))
+        if method == "recent_history":
+            return [{"id": t.id, "role": t.role, "text": t.text, "ts": t.ts}
+                    for t in self.dialogue.recent(limit=int(params.get("limit", 20)))]
+        if method == "commit_summary":
+            return self.commit_summary(str(params.get("text", "")), str(params.get("scope", "session")))
+        if method == "log_event":
+            return self.log_event(
+                int(params.get("pid", 0)), str(params.get("query", "")),
+                list(params.get("page_ids") or []), list(params.get("used_ids") or []),
+                int(params.get("outcome", 0)), int(params.get("tokens", 0)),
+                float(params.get("latency", 0.0)),
+            )
+        if method == "event_stats":
+            return self.event_stats()
         if method == "history":
             return [{"role": t.role, "text": t.text, "ts": t.ts}
                     for t in self.dialogue.history(limit=int(params.get("limit", 100)))]
@@ -88,6 +118,7 @@ class PagerService:
                 "memory": self.memory.stats(),
                 "turns": self.dialogue.count(),
                 "faults": self.faults,
+                "events": self.event_stats(),
             }
         if method == "ping":
             return "pong"
@@ -99,6 +130,33 @@ class PagerService:
         if not items:
             return 0
         return self.memory.add_many(items, source="chat")
+
+    def commit_summary(self, text: str, scope: str = "session") -> dict:
+        text = (text or "").strip()
+        if not text:
+            return {"added": False}
+        mem = self.memory.add(text, kind="summary", importance=0.75,
+                              source=f"consolidation:{scope}")
+        return {"added": bool(mem), "total": self.memory.stats()["total"]}
+
+    def log_event(self, pid: int, query: str, page_ids: list[int],
+                  used_ids: list[int], outcome: int, tokens: int, latency: float) -> dict:
+        import json as _json
+        import time as _time
+        self.memory._conn.execute(
+            "INSERT INTO memory_events (ts,pid,query,page_ids,used_ids,outcome,tokens,latency)"
+            " VALUES (?,?,?,?,?,?,?,?)",
+            (_time.time(), pid, query[:1000], _json.dumps(page_ids), _json.dumps(used_ids),
+             outcome, tokens, latency),
+        )
+        self.memory._conn.commit()
+        return {"ok": True}
+
+    def event_stats(self) -> dict:
+        row = self.memory._conn.execute(
+            "SELECT COUNT(*), COALESCE(SUM(tokens),0), COALESCE(SUM(outcome),0) FROM memory_events"
+        ).fetchone()
+        return {"total": int(row[0]), "tokens": int(row[1]), "reward": int(row[2])}
 
     def commit_episode(self, data: dict) -> dict:
         if self.consolidator is None:

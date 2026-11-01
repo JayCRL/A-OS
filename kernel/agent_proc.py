@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 from kernel import persona
 from kernel.process import Process
+from kernel.tokens import estimate_tokens
 
 _LEADING = re.compile(r"^\s*(A-OS|a-os|助手)\s*[:：]\s*")
 MAX_STEPS = 8
@@ -58,6 +60,7 @@ class AgentProcess:
         if not text:
             return "在呢，你说。"
 
+        started = time.time()
         begin = await self.bus.call("pager", "begin_turn", pid=proc.pid, text=text)
         profile = begin.get("profile") or []
         await self.bus.call("pager", "prefetch", pid=proc.pid, query=text)
@@ -69,6 +72,7 @@ class AgentProcess:
         trace: list[str] = []
         answer: str | None = None
         last_prompt = ""
+        last_pages: list[int] = []
         used_web = False
         web_nudged = False
 
@@ -80,6 +84,7 @@ class AgentProcess:
                 profile=profile, must_include=[], budget=self.k.budget,
             )
             last_prompt = composed["prompt"]
+            last_pages = list(composed.get("pages") or [])
             if trace:
                 last_prompt += "\n\n===【本轮进展】===\n" + "\n".join(trace[-4:])
 
@@ -124,6 +129,11 @@ class AgentProcess:
             answer = await self._force_answer(last_prompt)
 
         await self.bus.call("pager", "finish_turn", pid=proc.pid, user=text, answer=answer)
+        await self.bus.call(
+            "pager", "log_event", pid=proc.pid, query=text,
+            page_ids=last_pages, used_ids=[], outcome=0,
+            tokens=estimate_tokens(last_prompt), latency=round(time.time() - started, 2),
+        )
         say = await self.bus.call("kernel", "state_add", pid=proc.pid,
                                   content=f"回答：{answer[:70]}", kind="say")
         await self.bus.call("kernel", "state_prune", node_id=say["id"], pid=proc.pid)

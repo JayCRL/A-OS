@@ -50,6 +50,29 @@ class FactModel:
         return ModelReply("好，记住了。", Usage(10, 5))
 
 
+class SummaryModel:
+    ready = True
+
+    def __init__(self) -> None:
+        self.usage = Usage()
+
+    async def chat(self, messages, *, max_tokens=512, temperature=0.3):
+        system = str(messages[0].get("content", ""))
+        if "编目器" in system:
+            return ModelReply(
+                '{"noise": true, "facts": [{"text": "用户叫阿测", "kind": "identity", "importance": 0.9}]}',
+                Usage(10, 10),
+            )
+        if "巩固器" in system:
+            return ModelReply(
+                '{"summary": "用户叫阿测，计划下周三去北京。", '
+                '"facts": [{"text": "用户下周三去北京", "kind": "plan", "importance": 0.8}], '
+                '"supersedes": [], "open_tasks": [], "topics": ["出行"]}',
+                Usage(10, 10),
+            )
+        return ModelReply("好。", Usage(10, 5))
+
+
 class EchoModel:
     ready = True
 
@@ -156,6 +179,20 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         stats = await self.mk.bus.call("kernel", "stats")
         self.assertGreaterEqual(stats["processes"].get("total", 0), 1, stats)
         self.assertGreaterEqual(stats["processes"].get("waiting", 0), 1, stats)
+
+    async def test_memory_events_and_consolidation(self) -> None:
+        model = SummaryModel()
+        self.mk.model = model
+        self.mk.librarian.model = model
+        self.mk.librarian.extractor.model = model
+        self.mk.librarian.summary_every = 2
+        await self.mk.ask("我叫阿测")
+        await self.mk.ask("我下周三去北京")
+        await self.mk.bus.call("librarian", "flush")
+        stats = await self.mk.bus.call("pager", "stats")
+        self.assertGreaterEqual(stats["memory"]["by_kind"].get("summary", 0), 1, stats)
+        events = await self.mk.bus.call("pager", "event_stats")
+        self.assertGreaterEqual(events["total"], 2, events)
 
     async def test_facts_from_extractor_enter_profile(self) -> None:
         model = FactModel()
