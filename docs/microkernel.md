@@ -13,6 +13,7 @@ Microkernel
  ├─ MessageBus        命名端点 + 请求/响应 + 超时 + 队列统计
  ├─ ProcessTable      ready/running/waiting/done/killed
  ├─ KernelScheduler   优先级队列，最多 3 个进程协程
+ ├─ Dispatcher        输入 → 判断复用哪个会话进程 / 新建进程
  ├─ StateDAG          每个进程一条状态路径（pid）
  ├─ Journal           任务租约/断点
  │
@@ -96,6 +97,26 @@ mk.ask("继续搞登录页")
 | DATA | 图节点页、长期记忆页 | 按预算换入换出 |
 
 图节点页内容 = `GraphStore.render(node)`（summary + lessons + artifact + 子节点），不是整份文件。
+
+## 会话调度器
+
+每条输入先过 Dispatcher，不再"一条消息一个 pid"：
+
+```
+同 channel、最近活跃
+  + 出现 要/继续/这个/刚才/？ 等指代
+  或 与上一轮文本字面重合 ≥ 0.18
+  → 复用已有 session 进程
+
+否则 → 新建 session 进程
+```
+
+- 一个会话进程是常驻 loop：收到消息 `running`，空闲 `waiting`；
+- 同一会话共用一个 pid，HUMAN/DAG/DATA 页天然连续；
+- 会话 30 分钟无输入过期，进程收 None 退出；
+- 旧会话的工作集按 `_reap_old_pids` 降温，再回来时用最近 8 轮兜底。
+
+这就是"Dsh superagent"那类做法的小号版：Dispatcher 是入口调度，agent 进程是会话执行体；以后要加子 agent，只要让 Dispatcher 把任务路由到 child pid。
 
 ## 文件块缺页
 
@@ -181,7 +202,7 @@ python3 -m unittest tests.test_microkernel -v
 python3 tests/mk_demo.py
 ```
 
-18 个微内核用例：
+19 个微内核用例：
 
 - 启动/服务注册/内核 state
 - 未知服务
@@ -200,11 +221,12 @@ python3 tests/mk_demo.py
 - 文件块缺页：图空时从 VFS 语义索引换入
 - split 模式：三个独立进程、远程 pager/librarian/vfs 流程
 - 跨进程上下文：第二个 pid 能看到上一轮回答
+- Dispatcher 复用：第二轮"要"命中同一个 pid，prompt 带上一轮回答
 
 全量：
 
 ```
-Ran 43 tests in 15.7s
+Ran 44 tests in 16.8s
 OK
 ```
 
