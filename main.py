@@ -24,6 +24,8 @@ from drivers.model import DeepSeekKernel, OfflineKernel
 from drivers import protocol
 from drivers.embedding import load_encoder
 from kernel.executor import Executor
+from kernel.shell_sandbox import ShellSandbox
+from drivers.mcp_client import McpRegistry
 from kernel.progress import ProgressTracker
 from kernel.journal import Journal
 
@@ -43,7 +45,10 @@ class AOS:
         self.spooler = IOSpooler(idle_seconds=idle)
         self.kernel = DeepSeekKernel() if DeepSeekKernel().ready else OfflineKernel()
         self.guard_factory = ProgressTracker
-        self.executor = Executor(self.home / "workspace", allow_shell=False)
+        self.sandbox = ShellSandbox(self.home / "workspace", allow_shell := True) if False else ShellSandbox(self.home / "workspace")
+        self.mcp = McpRegistry(Path("/opt/aos/mcp.json"))
+        self.executor = Executor(self.home / "workspace", allow_shell=True,
+                                 sandbox=self.sandbox, mcp=self.mcp)
         self.max_rounds = int(os.environ.get("AOS_MAX_ROUNDS", "6"))
         self.encoder = load_encoder()
         self.journal = Journal(self.home / "tasks.db")
@@ -56,6 +61,9 @@ class AOS:
 
     async def boot(self) -> None:
         await self.sched.start()
+        started = await self.mcp.load()
+        if started:
+            self.emit(f"MCP 已挂载：{', '.join(started)}")
         if self._head is None:
             self._head = self.dag.add("系统就绪", kind="boot")
         self._migrate_vectors()
@@ -331,6 +339,7 @@ class AOS:
         self.mmu.close()
         self.dag.close()
         self.journal.close()
+        await self.mcp.stop_all()
         self.emit(f"bye: {self.mmu.stats()} {self.dag.stats()}")
 
 

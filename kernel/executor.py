@@ -26,11 +26,14 @@ class Observation:
 
 
 class Executor:
-    def __init__(self, root: Path, *, allow_shell: bool = False, guard=None) -> None:
+    def __init__(self, root: Path, *, allow_shell: bool = False, guard=None,
+                 sandbox=None, mcp=None) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.allow_shell = allow_shell
         self.guard = guard
+        self.sandbox = sandbox
+        self.mcp = mcp
 
     # ---------- 路径安全 ----------
 
@@ -65,6 +68,8 @@ class Executor:
                 return self._search(args)
             if name == "shell":
                 return await self._shell(args)
+            if name == "mcp":
+                return await self._mcp(args)
             if name == "done":
                 return Observation(True, str(args.get("summary", "")))
             return Observation(False, f"未知动作 {name}")
@@ -141,9 +146,26 @@ class Executor:
             hits.append(f"{path.relative_to(self.root)}: {snippet}")
         return Observation(True, "\n".join(hits) or f"没有命中 {keyword}")
 
+    async def _mcp(self, args: dict) -> Observation:
+        if self.mcp is None:
+            return Observation(False, "没有挂载 MCP")
+        server = str(args.get("server", ""))
+        tool = str(args.get("tool", ""))
+        call_args = args.get("arguments") or {}
+        if not isinstance(call_args, dict):
+            return Observation(False, "arguments 必须是对象")
+        text = await self.mcp.call(server, tool, call_args)
+        return Observation(True, text[:MAX_OUTPUT])
+
     async def _shell(self, args: dict) -> Observation:
         if not self.allow_shell:
             return Observation(False, "shell 未启用")
+        if self.sandbox is not None:
+            cmd0 = str(args.get("cmd", "")).strip()
+            if not cmd0:
+                return Observation(False, "缺少 cmd")
+            res = await self.sandbox.run(cmd0)
+            return Observation(res.ok, res.output)
         cmd = str(args.get("cmd", "")).strip()
         if not cmd:
             return Observation(False, "缺少 cmd")

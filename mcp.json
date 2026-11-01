@@ -1,0 +1,7 @@
+{
+  "servers": {
+    "mock": {
+      "command": ["python3", "/opt/aos/tests/mock_mcp_server.py"]
+    }
+  }
+}

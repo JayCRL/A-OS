@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 
-ACTION_NAMES = {"read", "write", "append", "list", "search", "shell", "done"}
+ACTION_NAMES = {"read", "write", "append", "list", "search", "shell", "mcp", "done"}
 
 SYSTEM = """你是 A-OS 的内核进程，只能通过动作与世界交互。
 
@@ -22,7 +22,8 @@ SYSTEM = """你是 A-OS 的内核进程，只能通过动作与世界交互。
 - append {"action":"append","path":"相对路径","content":"追加内容"}
 - list   {"action":"list","path":"相对路径，可为 ."}
 - search {"action":"search","keyword":"关键词"}
-- shell  {"action":"shell","cmd":"命令"}   # 谨慎使用
+- shell  {"action":"shell","cmd":"命令"}   # 仅限白名单命令
+- mcp    {"action":"mcp","server":"服务名","tool":"工具名","arguments":{}}
 - done   {"action":"done","summary":"本轮结论"}
 
 规则：
