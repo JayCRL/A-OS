@@ -52,9 +52,12 @@ DEFAULT_WEIGHTS = {
 class PageTable:
     """页表：维护页的生命周期，并按预算组装上下文。"""
 
-    def __init__(self, db_path: str | Path, *, weights: dict[str, float] | None = None) -> None:
+    def __init__(self, db_path: str | Path, *, weights: dict[str, float] | None = None,
+                 max_active: int = 5, top_k: int = 2) -> None:
         self.db_path = str(db_path)
         self.weights = {**DEFAULT_WEIGHTS, **(weights or {})}
+        self.max_active = max_active
+        self.top_k = top_k
         self._pages: dict[int, Page] = {}
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
@@ -158,7 +161,22 @@ class PageTable:
         self._conn.commit()
         page.page_id = int(cur.lastrowid)
         self._pages[page.page_id] = page
+        self._enforce_capacity()
         return page
+
+    def _enforce_capacity(self) -> list[int]:
+        """活跃页超过上限，把最久没用且没钉住的换出去。"""
+
+        active = [p for p in self._pages.values() if p.state is PageState.ACTIVE and not p.pinned]
+        if len(active) <= self.max_active:
+            return []
+        active.sort(key=lambda p: p.last_used)
+        evicted: list[int] = []
+        for page in active[: len(active) - self.max_active]:
+            page.state = PageState.SWAPPED
+            self._persist(page)
+            evicted.append(page.page_id)
+        return evicted
 
     def get(self, page_id: int) -> Page | None:
         return self._pages.get(page_id)
@@ -188,6 +206,22 @@ class PageTable:
             return
         page.state = PageState.SWAPPED
         self._persist(page)
+
+    def compact(self, *, tag: str = "interrupt", keep: int = 1) -> Page | None:
+        """把同类旧页压成一句摘要，只留最后一个。"""
+
+        targets = [p for p in self._pages.values()
+                   if p.tag == tag and p.state is PageState.ACTIVE and not p.pinned]
+        if len(targets) <= keep:
+            return None
+        targets.sort(key=lambda p: p.page_id)
+        old = targets[:-keep]
+        text = "；".join(p.content.strip()[:40] for p in old)
+        for page in old:
+            page.state = PageState.SWAPPED
+            page.stale = True
+            self._persist(page)
+        return self.add(f"历史摘要：{text[:200]}", importance=0.4, tag="summary")
 
     def invalidate_source(self, source: str) -> int:
         """源文件变了：相关页标记 stale 并换出，下次查询重新取。"""
@@ -257,6 +291,7 @@ class PageTable:
         footer: str = "",
         header_tokens: int = 0,
         footer_tokens: int = 0,
+        top_k: int | None = None,
     ) -> tuple[str, list[int]]:
         """按预算组装上下文，超出的页换出。返回 (prompt, 页号列表)。"""
 
@@ -264,9 +299,15 @@ class PageTable:
         chosen: list[Page] = []
         used = 0
 
+        limit = self.top_k if top_k is None else top_k
+        picked = 0
         for _, page in self.ranked(query_vec=query_vec):
             if page.stale and not page.pinned:
                 continue
+            if not page.pinned and picked >= limit:
+                continue
+            if not page.pinned:
+                picked += 1
             if page.pinned:
                 if page.state is PageState.SWAPPED:
                     self.swap_in(page.page_id)

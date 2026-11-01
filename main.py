@@ -378,6 +378,9 @@ class AOS:
         affected = self.depgraph.affected_by(rel)
         for item in affected:
             n += self.mmu.invalidate_source(item)
+        merged = self.mmu.compact(tag="interrupt", keep=1)
+        if merged:
+            self.emit(f"[合并] 闲聊页压缩成摘要 #${merged.page_id}")
         if n:
             self.emit(f"[依赖失效] {rel} 改动，作废 {n} 页（波及 {len(affected)} 个文件）")
         self.depgraph.refresh()
