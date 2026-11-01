@@ -119,8 +119,11 @@ class PagerService:
         shown = text if len(text) <= 4000 else text[:4000] + "…（已截断）"
         self.mmu.add(f"用户：{shown}", segment=Segment.HUMAN, pinned=True,
                      tag="turn", importance=1.0, pid=pid)
-        # 新 pid 没有上一轮的热页；从对话史导入最近几轮，接住"要""继续"这种指代
-        self._import_history(pid, before_id=turn.id, limit=8)
+        # 只有新进程才需要导入历史；同一会话进程的 DAG 页还在
+        has_dag = any(p.pid == pid and p.segment is Segment.DAG_STATE
+                      and p.state.value == "active" for p in self.mmu._pages.values())
+        if not has_dag:
+            self._import_history(pid, before_id=turn.id, limit=8)
 
         # 系统页每轮刷新时间，内容仍是同一页
         sys_text = persona.system_prompt()

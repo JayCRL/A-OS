@@ -52,6 +52,8 @@ async def run_cli(mk: Microkernel) -> None:
             print(f"图：{graph.get('active', 0)} 节点 / {graph.get('edges', 0)} 边 / "
                   f"{graph.get('trials', 0)} 试错")
             print(f"总线：{snap['bus']['sent']} 条")
+            disp = snap.get("dispatcher") or {}
+            print(f"会话：{disp.get('sessions', 0)} 个（复用 {disp.get('reused', 0)}）")
             continue
         if text == "/memory":
             stats = mk.pager.memory.stats()

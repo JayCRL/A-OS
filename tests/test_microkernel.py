@@ -138,7 +138,8 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("登录页", prompt)
         self.assertIn("用户：继续搞登录页", prompt)
         stats = await self.mk.bus.call("kernel", "stats")
-        self.assertGreaterEqual(stats["processes"].get("done", 0), 1, stats)
+        self.assertGreaterEqual(stats["processes"].get("total", 0), 1, stats)
+        self.assertGreaterEqual(stats["processes"].get("waiting", 0), 1, stats)
 
     async def test_page_fault_trap_loads_graph_pages(self) -> None:
         await self._seed()
@@ -161,7 +162,8 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         sources = [p.source for p in self.mk.pager.mmu._pages.values()]
         self.assertTrue(any(s.startswith("graph:") for s in sources), sources)
         self.assertGreaterEqual((await self.mk.bus.call("pager", "stats"))["faults"], 1)
-        self.assertEqual((await self.mk.bus.call("kernel", "processes"))[0]["state"], "done")
+        self.assertIn((await self.mk.bus.call("kernel", "processes"))[0]["state"],
+                      ("waiting", "running"))
 
     async def test_tool_call_goes_through_vfs(self) -> None:
         model = ScriptModel([
@@ -243,6 +245,18 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("kernel", dbg)
         finally:
             await client.close()
+
+    async def test_dispatcher_reuses_session_for_continuation(self) -> None:
+        model = ScriptModel(["热搜列表：A、B、C", "好的，再刷一次"])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        await self.mk.ask("热搜有哪些")
+        await self.mk.ask("要")
+        self.assertEqual(len(self.mk.table._procs), 1)
+        prompt = model.prompts[-1][-1]["content"]
+        self.assertIn("热搜列表：A、B、C", prompt)
+        self.assertIn("用户：要", prompt)
+        self.assertEqual(self.mk.dispatcher.stats()["reused"], 1)
 
     async def test_recent_history_crosses_processes(self) -> None:
         model = ScriptModel(["第一轮：百度热搜有几条", "第二轮：好的，再刷一次"])

@@ -15,6 +15,7 @@ from typing import Any, Awaitable, Callable
 
 from drivers.embedding import load_encoder
 from drivers.model import DeepSeekKernel, OfflineKernel
+from kernel.dispatcher import Dispatcher
 from kernel.ipc import MessageBus
 from kernel.journal import Journal
 from kernel.kernel_scheduler import Job, KernelScheduler
@@ -44,7 +45,8 @@ class Microkernel:
             self.model = DeepSeekKernel() if DeepSeekKernel().ready else OfflineKernel()
 
         self.table = ProcessTable()
-        self.sched = KernelScheduler(max_workers=3)
+        self.sched = KernelScheduler(max_workers=8)
+        self.dispatcher = Dispatcher()
         self.spool = Spool(self.home)
         self._workers: list[asyncio.subprocess.Process] = []
         self._clients: dict[str, UnixClient] = {}
@@ -137,6 +139,8 @@ class Microkernel:
 
     async def close(self) -> None:
         self._state = "stopping"
+        for session in list(self.dispatcher.sessions.values()):
+            await session.queue.put(None)
         if self.split:
             try:
                 await self.bus.call("librarian", "flush", timeout=10)
@@ -224,13 +228,25 @@ class Microkernel:
             return "在呢，你说。"
         self.spool.input(text, channel=channel)
 
-        async def routine(proc, mk):
-            return await AgentProcess(mk).run(proc)
+        for old in self.dispatcher.expired():
+            if old.pid is not None:
+                await old.queue.put(None)
+            self.dispatcher.drop(old)
+
+        session, is_new = self.dispatcher.route(text, channel=channel)
+        proc = self.table.get(session.pid) if session.pid is not None else None
+        if is_new or proc is None or proc.state in (ProcState.DONE, ProcState.KILLED):
+            proc = await self.spawn("session", self._session_loop,
+                                    payload={"session": session})
+            session.pid = proc.pid
+            session.created = time.time()
 
         started = time.time()
         self._history_cache.append({"role": "user", "text": text, "ts": time.time()})
-        proc = await self.spawn("chat", routine, payload={"text": text, "channel": channel})
-        answer = await self.wait(proc.pid, timeout=timeout)
+        fut = asyncio.get_running_loop().create_future()
+        await session.queue.put({"text": text, "future": fut})
+        answer = await asyncio.wait_for(fut, timeout=timeout)
+        self.dispatcher.touch(session, text, answer)
         self._history_cache.append({"role": "assistant", "text": answer, "ts": time.time()})
         del self._history_cache[:-200]
         self.spool.output(pid=proc.pid, channel=channel, text=answer)
@@ -247,8 +263,28 @@ class Microkernel:
         }
         return answer
 
+    async def _session_loop(self, proc: Process, _kernel) -> None:
+        from kernel.agent_proc import AgentProcess
+
+        session = proc.payload["session"]
+        agent = AgentProcess(self)
+        while self._state in ("booting", "running"):
+            self.table.set_state(proc.pid, ProcState.WAITING)
+            item = await session.queue.get()
+            if item is None:
+                break
+            self.table.set_state(proc.pid, ProcState.RUNNING)
+            future = item.get("future")
+            try:
+                answer = await agent.run_turn(proc, str(item.get("text", "")))
+                if future is not None and not future.done():
+                    future.set_result(answer)
+            except Exception as exc:  # noqa: BLE001
+                if future is not None and not future.done():
+                    future.set_exception(exc)
+
     async def reply(self, text: str) -> str:
-        return await self.ask(text)
+        return await self.ask(text, channel="web")
 
     @property
     def memory(self):
@@ -346,6 +382,7 @@ class Microkernel:
                 "scheduler": self.sched.stats(),
                 "bus": self.bus.stats() if self.bus else {},
                 "services": self.bus.endpoints() if self.bus else [],
+                "dispatcher": self.dispatcher.stats(),
                 "pager": graph,
                 "pages": pages,
                 "memory": memory,
@@ -379,6 +416,7 @@ class Microkernel:
             "scheduler": self.sched.stats(),
             "bus": self.bus.stats(),
             "services": self.bus.endpoints(),
+            "dispatcher": self.dispatcher.stats(),
             "pager": self.pager.graph.stats(),
             "pages": self.pager.mmu.stats(),
             "memory": self.pager.memory.stats(),

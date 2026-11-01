@@ -52,7 +52,10 @@ class AgentProcess:
         self.bus = kernel.bus
 
     async def run(self, proc: Process) -> str:
-        text = str(proc.payload.get("text", "")).strip()
+        return await self.run_turn(proc, str(proc.payload.get("text", "")))
+
+    async def run_turn(self, proc: Process, text: str) -> str:
+        text = (text or "").strip()
         if not text:
             return "在呢，你说。"
 
