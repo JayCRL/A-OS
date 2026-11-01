@@ -102,7 +102,21 @@ class AgentProcess:
 
             tool = parse_tool(raw)
             if tool is not None:
-                trace.append(f"#{step} 工具 {tool[0]} 还没接入微内核，直接回答。")
+                name, payload = tool
+                args = payload.get("args") if isinstance(payload.get("args"), dict) else {
+                    k: v for k, v in payload.items() if k not in ("tool", "action", "args")
+                }
+                result = await self.bus.call("vfs", "run", name=name, args=args)
+                if len(result) > 2400:
+                    result = result[:2400] + "…（已截断）"
+                if name in ("write", "append"):
+                    path = str(args.get("path", ""))
+                    await self.bus.call("pager", "invalidate", source=path)
+                await self.bus.call("kernel", "state_add", pid=proc.pid,
+                                    content=f"{name} {args.get('path', '')}"[:70], kind="act")
+                await self.bus.call("kernel", "journal_checkpoint", task_id=task_id,
+                                    node_id=goal["id"], round=step, steps=step)
+                trace.append(f"#{step} {name} → {result[:200]}")
                 continue
 
             answer = clean(raw)

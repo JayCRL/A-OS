@@ -73,10 +73,10 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_boot_services_and_kernel_state(self) -> None:
         self.assertEqual(self.mk._state, "running")
-        self.assertEqual(self.mk.bus.endpoints(), ["kernel", "librarian", "pager"])
+        self.assertEqual(self.mk.bus.endpoints(), ["kernel", "librarian", "pager", "vfs"])
         state = await self.mk.bus.call("kernel", "state")
         self.assertEqual(state["state"], "running")
-        self.assertEqual(state["services"], ["kernel", "librarian", "pager"])
+        self.assertEqual(state["services"], ["kernel", "librarian", "pager", "vfs"])
         self.assertEqual(await self.mk.bus.call("kernel", "ping"), "pong")
         self.assertEqual(await self.mk.bus.call("pager", "ping"), "pong")
 
@@ -158,7 +158,32 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(pages["segments"]["data"], 1, pages)
         sources = [p.source for p in self.mk.pager.mmu._pages.values()]
         self.assertTrue(any(s.startswith("graph:") for s in sources), sources)
+        self.assertGreaterEqual((await self.mk.bus.call("pager", "stats"))["faults"], 1)
         self.assertEqual((await self.mk.bus.call("kernel", "processes"))[0]["state"], "done")
+
+    async def test_tool_call_goes_through_vfs(self) -> None:
+        model = ScriptModel([
+            '{"tool":"write","path":"note.txt","content":"dya 星期一回来"}',
+            "写好了。",
+        ])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        answer = await self.mk.ask("把 dya 星期一回来写进 note.txt")
+        self.assertEqual(answer, "写好了。")
+        self.assertTrue((self.home / "workspace" / "note.txt").exists())
+        self.assertGreaterEqual(len(model.prompts), 2)
+        spool = await self.mk.bus.call("kernel", "state")
+        self.assertEqual(spool["spool"]["in"], 1)
+        self.assertEqual(spool["spool"]["out"], 1)
+
+    async def test_dma_loads_into_cache_and_index(self) -> None:
+        (self.home / "workspace").mkdir(parents=True, exist_ok=True)
+        (self.home / "workspace" / "plan.md").write_text("周三评审接口", encoding="utf-8")
+        result = await self.mk.bus.call("vfs", "dma_load", path="plan.md")
+        self.assertTrue(result["ok"], result)
+        self.assertTrue(result["handle"].startswith("dma:"))
+        self.assertGreater(result["bytes"], 0)
+        self.assertTrue((self.home / "dma").exists())
 
     async def test_state_tree_is_per_process(self) -> None:
         echo = EchoModel()
@@ -172,6 +197,30 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第一句话", first)
         self.assertNotIn("第二句话", first)
         self.assertIn("第二句话", second)
+
+    async def test_web_routes_use_microkernel(self) -> None:
+        from aiohttp.test_utils import TestClient, TestServer
+        from web.server import make_app
+
+        model = EchoModel()
+        self.mk.model = model
+        self.mk.librarian.model = model
+        client = TestClient(TestServer(make_app(self.mk)))
+        await client.start_server()
+        try:
+            page = await client.get("/")
+            self.assertEqual(page.status, 200)
+            self.assertIn("A-OS", await page.text())
+            r = await client.post("/api/chat", json={"text": "你好"})
+            data = await r.json()
+            self.assertTrue(data["ok"], data)
+            self.assertEqual(data["reply"], "看到图里的内容了。")
+            hist = await (await client.get("/api/history")).json()
+            self.assertEqual(len(hist["turns"]), 2)
+            dbg = await (await client.get("/api/debug")).json()
+            self.assertIn("kernel", dbg)
+        finally:
+            await client.close()
 
     async def test_bus_counts(self) -> None:
         await self.mk.bus.call("kernel", "ping")

@@ -29,6 +29,7 @@ class PagerService:
         self.mmu = PageTable(self.home / "pages.db", max_active=10)
         self.memory = MemoryStore(self.home / "brain.db", encoder)
         self.dialogue = Dialogue(self.home / "brain.db", session="main")
+        self.faults = 0
 
     async def boot(self) -> None:
         self.mmu.upsert(persona.system_prompt(), source="sys:persona",
@@ -52,6 +53,9 @@ class PagerService:
         if method == "fault":
             return self.fault(int(params["pid"]), list(params.get("targets") or []),
                               set(params.get("hot") or []))
+        if method == "invalidate":
+            n = self.mmu.invalidate_source(str(params.get("source", "")))
+            return {"invalidated": n}
         if method == "finish_turn":
             return self.finish_turn(int(params["pid"]), str(params.get("user", "")),
                                     str(params.get("answer", "")))
@@ -64,6 +68,7 @@ class PagerService:
                 "pages": self.mmu.stats(),
                 "memory": self.memory.stats(),
                 "turns": self.dialogue.count(),
+                "faults": self.faults,
             }
         if method == "ping":
             return "pong"
@@ -139,6 +144,7 @@ class PagerService:
                 hot.add(page.page_id)
                 added += 1
             if added:
+                self.faults += added
                 messages.append(f"换入 {added} 个图节点（{target}）")
                 continue
             hits = self.memory.recall(target, k=2)

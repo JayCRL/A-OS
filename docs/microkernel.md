@@ -1,10 +1,10 @@
-# 微内核：phase 1 + phase 2
+# 微内核：phase 1 + 2 + 3
 
 目标：内核常驻，服务常驻，用户输入创建进程；pager / librarian 在内核外。
 
-当前状态：**进程、IPC、缺页陷阱、段页式 pager、长期记忆/画像/最近对话已接通。**
+当前状态：**进程、IPC、缺页陷阱、段页式 pager、长期记忆/画像、VFS 工具、DMA、spool、Web/CLI 已接通。**
 
-还差：Web/CLI 切换、VFS 工具、DMA/spool、服务拆独立进程。
+还差：服务拆独立进程、per-process 页表、文件块缺页、切生产 8799。
 
 ## 结构
 
@@ -18,7 +18,9 @@ Microkernel
  │
  ├─ pager 服务        PageTable + MemoryStore + Dialogue + GraphStore + GraphRetriever
  ├─ librarian 服务    LLMExtractor + Consolidator（后台写图）
- └─ agent_proc        进程 → compose / fault / state / journal → 模型
+ ├─ vfs 服务          文件 / 网页 / DMA 批量搬运
+ ├─ spool             inbox.jsonl / outbox.jsonl
+ └─ agent_proc        进程 → compose / fault / tool / state / journal → 模型
 ```
 
 内核只做机制：进程、调度、IPC、缺页陷阱。图检索、模型抽取、页策略都在服务里。
@@ -102,6 +104,7 @@ mk.ask("继续搞登录页")
 | kernel | 进程/调度/IPC/fault trap/状态树/journal | 是 |
 | pager | PageTable + 记忆 + 图检索 | 是 |
 | librarian | LLM 编目 + Consolidator + 写图 | 否 |
+| vfs | 文件/网页工具、DMA 搬运 | 否（工具轮次） |
 
 pager 和 librarian 当前共享同一个 `GraphStore` 实例（同进程）；拆进程时把写操作收敛到 memory 服务，pager 只读。
 
@@ -131,7 +134,7 @@ python3 -m unittest tests.test_microkernel -v
 python3 tests/mk_demo.py
 ```
 
-9 个微内核用例：
+13 个微内核用例：
 
 - 启动/服务注册/内核 state
 - 未知服务
@@ -142,18 +145,22 @@ python3 tests/mk_demo.py
 - 重启持久化
 - 总线计数
 - 进程异常 → killed
+- 工具调用走 VFS、写文件、spool 计数
+- DMA 把文件搬进缓存/索引
+- Web 路由走微内核
+- 按 pid 状态树隔离
 
 全量：
 
 ```
-Ran 34 tests in 5.775s
+Ran 38 tests in 6.7s
 OK
 ```
 
 ## 还没做
 
-1. Web/CLI 改成 `mk.ask`。
-2. VFS 服务：文件/网页工具，替换 agent 里“工具未接入”。
-3. DMA / 输入输出 spool。
-4. pager 和 librarian 拆独立进程，消息总线换 Unix socket。
-5. 谱坐标定期重算、图上限触发的在线合并。
+1. pager / librarian / vfs 拆独立进程，消息总线换 Unix socket。
+2. per-process 页表（现在还是全局工作集，用户回合串行化）。
+3. 文件块缺页：图里没有时走 VFS 语义索引，而不是只查长期记忆。
+4. 谱坐标定期重算、图上限触发的在线合并。
+5. 切生产 8799（先影子跑、再换 systemd ExecStart）。

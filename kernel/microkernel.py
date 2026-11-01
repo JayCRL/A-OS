@@ -18,9 +18,11 @@ from kernel.ipc import MessageBus
 from kernel.journal import Journal
 from kernel.kernel_scheduler import Job, KernelScheduler
 from kernel.process import ProcState, Process, ProcessTable
+from kernel.spool import Spool
 from kernel.state_dag import StateDAG
 from services.librarian import LibrarianService
 from services.pager import PagerService
+from services.vfs import VFSService
 
 Routine = Callable[[Process, "Microkernel"], Awaitable[Any]]
 
@@ -43,6 +45,11 @@ class Microkernel:
         self.sched = KernelScheduler(max_workers=3)
         self.pager = PagerService(self.home, self.encoder)
         self.librarian = LibrarianService(self.pager.graph, model=self.model)
+        self.vfs = VFSService(self.home, self.encoder)
+        self.spool = Spool(self.home)
+        self._last: dict = {}
+        self._last_pid: int | None = None
+        self._ask_lock = asyncio.Lock()
         self.dag = StateDAG(self.home / "dag.db")
         self.journal = Journal(self.home / "tasks.db")
         self.budget = int(os.environ.get("AOS_CTX_BUDGET", "8000"))
@@ -55,9 +62,11 @@ class Microkernel:
         self.bus.register("kernel", self)
         self.bus.register("pager", self.pager)
         self.bus.register("librarian", self.librarian)
+        self.bus.register("vfs", self.vfs)
         await self.bus.start()
         await self.pager.boot()
         await self.librarian.start()
+        await self.vfs.boot()
         await self.sched.start()
         self._state = "running"
 
@@ -66,6 +75,7 @@ class Microkernel:
         await self.librarian.close()
         await self.sched.stop()
         await self.bus.stop()
+        await self.vfs.close()
         await self.pager.close()
         self.dag.close()
         self.journal.close()
@@ -106,16 +116,43 @@ class Microkernel:
         proc = await self.spawn(name, routine)
         return await self.wait(proc.pid, timeout=timeout)
 
-    async def ask(self, text: str, *, timeout: float = 90.0) -> str:
+    async def ask(self, text: str, *, channel: str = "cli", timeout: float = 90.0) -> str:
         """一个用户请求 = 一个 agent 进程。"""
 
         from kernel.agent_proc import AgentProcess
 
+        text = (text or "").strip()
+        if not text:
+            return "在呢，你说。"
+        self.spool.input(text, channel=channel)
+
         async def routine(proc, mk):
             return await AgentProcess(mk).run(proc)
 
-        proc = await self.spawn("chat", routine, payload={"text": text})
-        return await self.wait(proc.pid, timeout=timeout)
+        started = time.time()
+        # phase 3：页表还是全局工作集，先串行化用户回合；per-process 页表后再放开
+        async with self._ask_lock:
+            proc = await self.spawn("chat", routine, payload={"text": text, "channel": channel})
+            answer = await self.wait(proc.pid, timeout=timeout)
+        self.spool.output(pid=proc.pid, channel=channel, text=answer)
+        self._last_pid = proc.pid
+        self._last = {
+            "elapsed": round(time.time() - started, 2),
+            "process": proc.pid,
+            "answer": answer[:120],
+        }
+        return answer
+
+    async def reply(self, text: str) -> str:
+        return await self.ask(text)
+
+    @property
+    def memory(self):
+        return self.pager.memory
+
+    def history(self, limit: int = 100) -> list[dict]:
+        return [{"role": t.role, "text": t.text, "ts": t.ts}
+                for t in self.pager.dialogue.history(limit=limit)]
 
     # ---------- 内核端点 ----------
 
@@ -203,4 +240,22 @@ class Microkernel:
             "dag": self.dag.stats(),
             "journal": self.journal.stats(),
             "librarian": self.librarian.stats(),
+            "vfs": self.vfs.stats(),
+            "spool": self.spool.stats(),
+            "memories": self.pager.memory.stats(),
+            "turns": self.pager.dialogue.count(),
+            "model": "online" if getattr(self.model, "ready", False) else "offline",
+            "last": self._last,
+            "tools": self.vfs.stats().get("tools", []),
+            "events": [],
+            "kernel": {
+                "nodes": self.dag.stats(),
+                "pages": self.pager.mmu.stats(),
+                "scheduler": self.sched.stats(),
+                "journal": self.journal.stats(),
+                "faults": self.pager.faults,
+                "steps": self._last.get("steps", 0),
+                "path": self.dag.render(limit=6, pid=self._last_pid)
+                if self._last_pid is not None else "",
+            },
         }
