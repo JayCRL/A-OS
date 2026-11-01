@@ -99,8 +99,10 @@ class AOS:
         if fixed:
             self.emit(f"向量迁移：{fixed} 页重新编码")
 
-    def emit(self, line: str) -> None:
-        self.log.append(line)
+    def emit(self, line: str, *, cls: str = "") -> None:
+        self.log.append({"text": line, "cls": cls})
+        if len(self.log) > 400:
+            del self.log[:-300]
         print(line, flush=True)
 
     # ---------- 终端 ----------
@@ -324,6 +326,24 @@ class AOS:
 
     _tree_cache: str | None = None
 
+    def snapshot(self) -> dict:
+        nodes = sorted(self.dag._nodes.values(), key=lambda n: n.node_id)[-40:]
+        pages = sorted(self.mmu._pages.values(), key=lambda p: p.page_id)[-30:]
+        return {
+            "dag": [{"id": n.node_id, "kind": n.kind, "status": n.status.value,
+                     "text": n.content[:80]} for n in nodes],
+            "pages": [{"id": p.page_id, "preview": p.content[:60].replace("\n", " "),
+                       "source": p.source, "stale": p.stale, "pinned": p.pinned}
+                      for p in pages],
+            "log": self.log[-120:],
+            "tokens": self.kernel.usage.total,
+            "running": len(self.sched.stats()["running"]),
+        }
+
+    async def inject(self, text: str) -> None:
+        self.emit(f"> {text}", cls="sys")
+        await self._handle_input(text)
+
     def _on_file_written(self, rel: str) -> None:
         """写文件 → 依赖它的页面失效，避免拿旧内容回答。"""
 
@@ -364,8 +384,24 @@ class AOS:
 
 
 async def main() -> None:
+    import sys as _sys
     aos = AOS()
     await aos.boot()
+
+    if "--web" in _sys.argv:
+        from web.server import serve
+        port = 8799
+        for i, arg in enumerate(_sys.argv):
+            if arg == "--port" and i + 1 < len(_sys.argv):
+                port = int(_sys.argv[i + 1])
+        events = asyncio.create_task(aos.event_loop())
+        try:
+            await serve(aos, "0.0.0.0", port)
+        finally:
+            events.cancel()
+            await aos.shutdown()
+        return
+
     terminal = asyncio.create_task(aos.terminal())
     events = asyncio.create_task(aos.event_loop())
     await terminal
