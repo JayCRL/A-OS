@@ -206,9 +206,31 @@ Ran 42 tests in 13.5s
 OK
 ```
 
+## 生产切换
+
+2026-11-01 已把 8799 切到微内核 split：
+
+```
+WorkingDirectory=/opt/aos-mk
+ExecStart=/usr/bin/python3 /opt/aos-mk/mk_main.py --web --port 8799 --split
+```
+
+切换前数据备份在 `/opt/aos/backups/data-<时间戳>/`，旧 unit 也在里面。
+
+当前进程：
+
+```
+kernel  /opt/aos-mk/mk_main.py
+vfs     services.worker vfs
+pager   services.worker pager
+librarian services.worker librarian
+```
+
+影子对比 6 题通过：记忆（JustProve/dya）、文件缺页（login.md）、网页搜索、闲聊、任务折叠（图 3 节点）。
+
 ## 还没做
 
-1. 切生产 8799（先影子跑、再换 systemd ExecStart）。
-2. 服务崩溃重启/健康检查；现在只负责启动和 SIGTERM。
-3. 谱坐标定期重算、图上限触发的在线合并。
-4. 三个服务各加载一份编码器，内存还要再压。
+1. 服务崩溃重启/健康检查；现在只负责启动和 SIGTERM。
+2. 谱坐标定期重算、图上限触发的在线合并。
+3. 三个服务各加载一份编码器，内存还要再压。
+4. 微内核版本还没合回 `main`，目前只在 `microkernel` 分支。
