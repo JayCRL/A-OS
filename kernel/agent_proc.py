@@ -71,6 +71,8 @@ class AgentProcess:
         answer: str | None = None
         last_prompt = ""
         seen_faults: list[str] = []
+        used_web = False
+        web_nudged = False
 
         for step in range(1, MAX_STEPS + 1):
             dag = (await self.bus.call("kernel", "state_render", pid=proc.pid,
@@ -112,6 +114,10 @@ class AgentProcess:
                 result = await self.bus.call("vfs", "run", name=name, args=args)
                 if len(result) > 2400:
                     result = result[:2400] + "…（已截断）"
+                if name in ("web_search", "web_fetch"):
+                    used_web = True
+                    if "出错了" in result or "没有返回结果" in result:
+                        trace.append("[系统] 联网失败了，换关键词再搜一次；再不行再用 web_fetch 打开具体网页。")
                 if name in ("write", "append"):
                     path = str(args.get("path", ""))
                     await self.bus.call("pager", "invalidate", source=path)
@@ -123,6 +129,12 @@ class AgentProcess:
                 continue
 
             answer = clean(raw)
+            refusal = ("不能联网", "没有联网", "无法联网", "不能搜索",
+                       "没有搜索能力", "无法搜索", "没有这个能力", "不具备联网")
+            if not used_web and not web_nudged and any(x in answer for x in refusal):
+                web_nudged = True
+                trace.append("[系统] 你有 web_search / web_fetch 工具，不要说不能联网；先调用工具查。")
+                continue
             break
 
         if answer is None:

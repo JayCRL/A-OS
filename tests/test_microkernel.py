@@ -268,6 +268,22 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("第一轮：百度热搜有几条", prompt)
         self.assertIn("用户：要", prompt)
 
+    async def test_web_refusal_gets_nudged_then_tool_runs(self) -> None:
+        self.mk.vfs.tools._web_search = lambda query: f"搜索结果：{query} → 示例网站 https://example.com"
+        model = ScriptModel([
+            "我不能联网，也没有搜索能力。",
+            '{"tool":"web_search","query":"武汉科技大学官网"}',
+            "查到了，官网是 www.wust.edu.cn。",
+        ])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        answer = await self.mk.ask("帮我搜索武汉科技大学官网")
+        self.assertIn("wust.edu.cn", answer)
+        joined = "\n".join(str(m.get("content", "")) for m in model.prompts[-1])
+        self.assertIn("武汉科技大学官网", joined)
+        tools = (await self.mk.bus.call("vfs", "stats"))["tools"]
+        self.assertTrue(any(t["tool"] == "web_search" for t in tools), tools)
+
     async def test_many_idle_sessions_do_not_block(self) -> None:
         echo = EchoModel()
         self.mk.model = echo
