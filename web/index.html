@@ -254,6 +254,7 @@
 
 <script>
 const $ = (id) => document.getElementById(id);
+const BASE = location.pathname.replace(/\/+$/, '');
 const wrap = $('wrap'), input = $('input'), sendBtn = $('send');
 let ws = null, retry = 0, busy = false, typingEl = null;
 
@@ -303,7 +304,7 @@ function showTyping(on) {
 
 async function loadHistory() {
   try {
-    const r = await fetch('/api/history');
+    const r = await fetch(BASE + '/api/history');
     const data = await r.json();
     if (!data.turns || !data.turns.length) {
       const w = document.createElement('div');
@@ -324,7 +325,7 @@ function setBusy(on) {
 
 function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-  try { ws = new WebSocket(proto + location.host + location.pathname.replace(/\/*$/, '') + '/ws'); }
+  try { ws = new WebSocket(proto + location.host + BASE + '/ws'); }
   catch (e) { return; }
   ws.onopen = () => { retry = 0; $('dot').classList.add('on'); $('status-text').textContent = '在线'; };
   ws.onclose = () => {
@@ -353,7 +354,7 @@ async function send() {
   }
   showTyping(true);
   try {
-    const r = await fetch('/api/chat', {
+    const r = await fetch(BASE + '/api/chat', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ text })
     });
@@ -384,7 +385,7 @@ let debugTimer = null;
 async function refreshDebug() {
   const body = $('debug-body');
   try {
-    const r = await fetch('/api/debug');
+    const r = await fetch(BASE + '/api/debug');
     const d = await r.json();
     const mem = d.memories || {}, k = d.kernel || {}, p = d.pages || k.pages || {};
     const n = k.nodes || {}, ds = d.dispatcher || {}, pstats = d.process_stats || {};
