@@ -109,6 +109,25 @@ IO 事件 → 调度器（每回合一个任务，并发上限 3）
 - 身份/偏好每轮固定带上；其余按需变成 DATA 页换入。
 - **库里的记忆不删**。放不进上下文的只是"这次不带"。
 
+## 图记忆（实验）
+
+这一层是"磁盘"的候选实现：把无限长的 episode 流水压成一张轻量图。
+
+- 图里只放 `project / module / task / decision / lesson / artifact / concept`，不放聊天轮次；
+- 失败试错进 `trials` 表，成功才折叠成 task 的 `artifact` / `lessons` 属性；
+- 上层 `parent_id` 骨架树 + 下层模块内局部图，度上限 12；
+- 谱坐标用归一化拉普拉斯的最小非零特征值，不把"最大特征值"当树；
+- 检索：别名/向量锚点 → 骨架路径 → 局部 1~2 跳 → 谱重排 → 3~5 个节点。
+
+10k 轮合成压测：**251 个节点、2000 条 trials 不进图、每次换入 5 个节点（316 token）**。
+
+```bash
+python3 -m unittest tests.test_graph -v
+python3 tests/synthetic_graph.py
+```
+
+现在还是独立引擎，没接对话 Agent 和页表；接入方案见 [docs/graph-memory.md](docs/graph-memory.md)。
+
 ## 用户看到什么
 
 终端：
@@ -193,6 +212,8 @@ web/
 main.py               入口
 tests/
   test_chat.py        17 个用例
+  test_graph.py       8 个图记忆用例
+  synthetic_graph.py  1 万轮合成压测
   smoke_live.py       真实模型冒烟
 ```
 
@@ -200,7 +221,8 @@ tests/
 
 ```bash
 cd /opt/aos
-python3 -m unittest tests.test_chat -v
+python3 -m unittest tests.test_chat tests.test_graph -v
+python3 tests/synthetic_graph.py
 ```
 
 覆盖：
