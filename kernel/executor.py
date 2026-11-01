@@ -27,13 +27,14 @@ class Observation:
 
 class Executor:
     def __init__(self, root: Path, *, allow_shell: bool = False, guard=None,
-                 sandbox=None, mcp=None) -> None:
+                 sandbox=None, mcp=None, on_write=None) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.allow_shell = allow_shell
         self.guard = guard
         self.sandbox = sandbox
         self.mcp = mcp
+        self.on_write = on_write
 
     # ---------- 路径安全 ----------
 
@@ -87,7 +88,9 @@ class Executor:
         text = path.read_text(encoding="utf-8", errors="ignore")
         if len(text) > MAX_READ:
             text = text[:MAX_READ] + f"\n...（截断，共 {len(text)} 字符）"
-        return Observation(True, f"{path.relative_to(self.root)}\n{text}")
+        rel = str(path.relative_to(self.root))
+        self._last_source = rel
+        return Observation(True, f"{rel}\n{text}")
 
     def _write(self, args: dict) -> Observation:
         target = self._resolve(args.get("path", ""))
@@ -96,7 +99,10 @@ class Executor:
         tmp = target.with_suffix(target.suffix + ".aos-tmp")
         tmp.write_text(content, encoding="utf-8")
         os.replace(tmp, target)
-        return Observation(True, f"写入 {target.relative_to(self.root)}（{len(content)} 字符）")
+        rel = str(target.relative_to(self.root))
+        if self.on_write:
+            self.on_write(rel)
+        return Observation(True, f"写入 {rel}（{len(content)} 字符）")
 
     def _append(self, args: dict) -> Observation:
         target = self._resolve(args.get("path", ""))

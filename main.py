@@ -25,6 +25,7 @@ from drivers import protocol
 from drivers.embedding import load_encoder
 from kernel.executor import Executor
 from kernel.shell_sandbox import ShellSandbox
+from kernel.depgraph import DepGraph
 from drivers.mcp_client import McpRegistry
 from kernel.progress import ProgressTracker
 from kernel.journal import Journal
@@ -47,8 +48,10 @@ class AOS:
         self.guard_factory = ProgressTracker
         self.sandbox = ShellSandbox(self.home / "workspace", allow_shell := True) if False else ShellSandbox(self.home / "workspace")
         self.mcp = McpRegistry(Path("/opt/aos/mcp.json"))
+        self.depgraph = DepGraph.build(self.home / "workspace")
         self.executor = Executor(self.home / "workspace", allow_shell=True,
-                                 sandbox=self.sandbox, mcp=self.mcp)
+                                 sandbox=self.sandbox, mcp=self.mcp,
+                                 on_write=self._on_file_written)
         self.max_rounds = int(os.environ.get("AOS_MAX_ROUNDS", "6"))
         self.encoder = load_encoder()
         self.journal = Journal(self.home / "tasks.db")
@@ -175,6 +178,7 @@ class AOS:
         for rnd in range(start_round + 1, self.max_rounds + 1):
             header = (f"任务目标：{summary}\n"
                       f"文件树（已缓存，别 list）：\n{self._tree()}\n"
+                      f"依赖（谁 import 谁）：\n{self.depgraph.render(limit=8)}\n"
                       f"台账：{guard.ledger()}")
             prompt, pages = self.mmu.compose(
                 query_vec=self._vec(summary),
@@ -207,6 +211,11 @@ class AOS:
                 self.emit(f"[重试] 输出不合法，第 {attempt + 2} 次")
             obs = await self.executor.run(action.name, action.args)
             guard.observe(action.name, action.args, obs.ok)
+
+            if action.name == "read" and obs.ok:
+                src = str(action.args.get("path", ""))
+                self.mmu.add(f"{src}\n{obs.text}"[:1500], vec=self._vec(obs.text[:800]),
+                             importance=0.6, tag="file", source=src)
             trace.append(f"#{rnd} {action.name} -> {str(obs)[:300]}")
 
             nudge = guard.intervention()
@@ -314,6 +323,17 @@ class AOS:
         self.emit(f"checkpoint：{job_id}")
 
     _tree_cache: str | None = None
+
+    def _on_file_written(self, rel: str) -> None:
+        """写文件 → 依赖它的页面失效，避免拿旧内容回答。"""
+
+        n = self.mmu.invalidate_source(rel)
+        affected = self.depgraph.affected_by(rel)
+        for item in affected:
+            n += self.mmu.invalidate_source(item)
+        if n:
+            self.emit(f"[依赖失效] {rel} 改动，作废 {n} 页（波及 {len(affected)} 个文件）")
+        self.depgraph.refresh()
 
     def _tree(self, limit: int = 60) -> str:
         if self._tree_cache is None:

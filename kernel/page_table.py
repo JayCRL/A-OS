@@ -33,6 +33,8 @@ class Page:
     vec: list[float] | None = None
     tag: str = ""
     tokens: int = 0
+    source: str = ""
+    stale: bool = False
 
     def __post_init__(self) -> None:
         if not self.tokens:
@@ -69,7 +71,9 @@ class PageTable:
                 last_used   REAL NOT NULL,
                 vec         TEXT,
                 tag         TEXT NOT NULL DEFAULT '',
-                tokens      INTEGER NOT NULL DEFAULT 0
+                tokens      INTEGER NOT NULL DEFAULT 0,
+                source      TEXT NOT NULL DEFAULT '',
+                stale       INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -81,7 +85,7 @@ class PageTable:
     def _load(self) -> None:
         rows = self._conn.execute(
             "SELECT page_id, content, state, pinned, importance, refs,"
-            " created_at, last_used, vec, tag, tokens FROM pages"
+            " created_at, last_used, vec, tag, tokens, source, stale FROM pages"
         ).fetchall()
         for r in rows:
             self._pages[r[0]] = Page(
@@ -96,13 +100,15 @@ class PageTable:
                 vec=json.loads(r[8]) if r[8] else None,
                 tag=r[9],
                 tokens=r[10],
+                source=r[11] if len(r) > 11 else "",
+                stale=bool(r[12]) if len(r) > 12 else False,
             )
 
     def _persist(self, page: Page) -> None:
         self._conn.execute(
             "INSERT INTO pages (page_id, content, state, pinned, importance, refs,"
-            " created_at, last_used, vec, tag, tokens)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)"
+            " created_at, last_used, vec, tag, tokens, source, stale)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)"
             " ON CONFLICT(page_id) DO UPDATE SET content=excluded.content,"
             " state=excluded.state, pinned=excluded.pinned,"
             " importance=excluded.importance, refs=excluded.refs,"
@@ -112,6 +118,7 @@ class PageTable:
                 page.page_id, page.content, page.state.value, int(page.pinned),
                 page.importance, page.refs, page.created_at, page.last_used,
                 json.dumps(page.vec) if page.vec else None, page.tag, page.tokens,
+                page.source, int(page.stale),
             ),
         )
         self._conn.commit()
@@ -126,6 +133,7 @@ class PageTable:
         importance: float = 0.0,
         tag: str = "",
         pinned: bool = False,
+        source: str = "",
     ) -> Page:
         page = Page(
             page_id=0,
@@ -134,14 +142,17 @@ class PageTable:
             importance=importance,
             tag=tag,
             pinned=pinned,
+            source=source,
         )
         cur = self._conn.execute(
             "INSERT INTO pages (content, state, pinned, importance, refs,"
-            " created_at, last_used, vec, tag, tokens) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " created_at, last_used, vec, tag, tokens, source, stale)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 page.content, page.state.value, int(page.pinned), page.importance,
                 0, page.created_at, page.last_used,
                 json.dumps(page.vec) if page.vec else None, page.tag, page.tokens,
+                page.source, int(page.stale),
             ),
         )
         self._conn.commit()
@@ -177,6 +188,30 @@ class PageTable:
             return
         page.state = PageState.SWAPPED
         self._persist(page)
+
+    def invalidate_source(self, source: str) -> int:
+        """源文件变了：相关页标记 stale 并换出，下次查询重新取。"""
+
+        count = 0
+        for page in self._pages.values():
+            if page.source == source and not page.stale:
+                page.stale = True
+                page.state = PageState.SWAPPED
+                self._persist(page)
+                count += 1
+        return count
+
+    def stale_sources(self) -> list[str]:
+        return sorted({p.source for p in self._pages.values() if p.stale and p.source})
+
+    def drop_stale(self, source: str | None = None) -> int:
+        targets = [p for p in self._pages.values()
+                   if p.stale and (source is None or p.source == source)]
+        for page in targets:
+            self._conn.execute("DELETE FROM pages WHERE page_id=?", (page.page_id,))
+            self._pages.pop(page.page_id, None)
+        self._conn.commit()
+        return len(targets)
 
     def swap_in(self, page_id: int) -> None:
         page = self._pages.get(page_id)
@@ -230,6 +265,8 @@ class PageTable:
         used = 0
 
         for _, page in self.ranked(query_vec=query_vec):
+            if page.stale and not page.pinned:
+                continue
             if page.pinned:
                 if page.state is PageState.SWAPPED:
                     self.swap_in(page.page_id)
