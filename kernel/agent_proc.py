@@ -125,7 +125,7 @@ class AgentProcess:
                                     content=f"{name} {args.get('path', '')}"[:70], kind="act")
                 await self.bus.call("kernel", "journal_checkpoint", task_id=task_id,
                                     node_id=goal["id"], round=step, steps=step)
-                trace.append(f"#{step} {name} → {result[:200]}")
+                trace.append(f"#{step} 工具 {name} 返回（优先使用）：{result[:600]}")
                 continue
 
             answer = clean(raw)
