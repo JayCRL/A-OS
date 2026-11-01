@@ -103,21 +103,32 @@ mk.ask("继续搞登录页")
 每条输入先过 Dispatcher，不再"一条消息一个 pid"：
 
 ```
-同 channel、最近活跃
-  + 出现 要/继续/这个/刚才/？ 等指代
-  或 与上一轮文本字面重合 ≥ 0.18
-  → 复用已有 session 进程
-
-否则 → 新建 session 进程
+同 channel 默认复用最近的 session 进程
+  + 短句、指代、emoji 都算同一段对话
+只有出现 "新任务/新话题/换个话题/重新开始"
+才新建 session 进程
 ```
 
 - 一个会话进程是常驻 loop：收到消息 `running`，空闲 `waiting`；
 - 会话 loop 是独立 asyncio task，不占调度 worker；真正跑一轮时才占用 turn 信号量（并发 3），所以 12 个空闲会话也不会把后续进程卡在 ready；
 - 同一会话共用一个 pid，HUMAN/DAG/DATA 页天然连续；
-- 会话 30 分钟无输入过期，进程收 None 退出；
+- 会话 10 分钟无输入过期，进程收 None 退出；
 - 旧会话的工作集按 `_reap_old_pids` 降温，再回来时用最近 8 轮兜底。
 
 这就是"Dsh superagent"那类做法的小号版：Dispatcher 是入口调度，agent 进程是会话执行体；以后要加子 agent，只要让 Dispatcher 把任务路由到 child pid。
+
+## 实时进程/记忆面板
+
+网页右上角 `⋯`（或 `?debug=1`）每 2 秒刷新：
+
+- 进程：pid / state / name / 存活时间
+- 会话：pid / channel / turns / title
+- 记忆：总数 + 分类
+- 页表：活跃/换出、token、四段分布
+- 图：节点/边/试错
+- 状态树、缺页、最近回答、状态路径、页列表、工具调用
+
+这是观察"调度器是不是把消息塞进了同一个进程"最直接的地方。
 
 ## 文件块缺页
 
@@ -224,6 +235,7 @@ python3 tests/mk_demo.py
 - 跨进程上下文：第二个 pid 能看到上一轮回答
 - Dispatcher 复用：第二轮"要"命中同一个 pid，prompt 带上一轮回答
 - 12 个空闲会话不阻塞后续消息
+- 同通道 3 条消息只保留 1 个 session 进程
 
 全量：
 
