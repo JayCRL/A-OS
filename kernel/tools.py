@@ -238,7 +238,7 @@ class Tools:
             page = resp.read(600_000).decode("utf-8", "ignore")
         blocks = re.findall(r'<li class="b_algo".*?</li>', page, re.S)
         results: list[str] = []
-        for block in blocks[:6]:
+        for block in blocks[:5]:
             m = re.search(r"<h2[^>]*>\s*<a[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", block, re.S)
             if not m:
                 continue
@@ -248,7 +248,7 @@ class Tools:
             sm = re.search(r"<p[^>]*>(.*?)</p>", block, re.S)
             if sm:
                 snippet = _strip_tags(sm.group(1))
-            results.append(f"- {title}\n  {link}\n  {snippet[:220]}")
+            results.append(f"- {title}\n  {link}\n  {snippet[:160]}")
         if not results:
             return weather or "搜索没有返回结果"
         return (weather + "\n\n" if weather else "") + f"「{query}」的搜索结果：\n" + "\n".join(results)
@@ -286,7 +286,7 @@ class Tools:
         text = _strip_tags(page)
         text = re.sub(r"\n{3,}", "\n\n", text).strip()
         if len(text) > 6000:
-            text = text[:6000] + "\n…（已截断）"
+            text = text[:6000]
         return f"{url}\n{text or '（页面没有可读正文）'}"
 
 

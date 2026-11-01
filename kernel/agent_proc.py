@@ -112,8 +112,8 @@ class AgentProcess:
                     k: v for k, v in payload.items() if k not in ("tool", "action", "args")
                 }
                 result = await self.bus.call("vfs", "run", name=name, args=args)
-                if len(result) > 2400:
-                    result = result[:2400] + "…（已截断）"
+                if len(result) > 4000:
+                    result = result[:4000].rsplit("\n", 1)[0]
                 if name in ("web_search", "web_fetch"):
                     used_web = True
                     if "出错了" in result or "没有返回结果" in result:
@@ -125,7 +125,7 @@ class AgentProcess:
                                     content=f"{name} {args.get('path', '')}"[:70], kind="act")
                 await self.bus.call("kernel", "journal_checkpoint", task_id=task_id,
                                     node_id=goal["id"], round=step, steps=step)
-                trace.append(f"#{step} 工具 {name} 返回（优先使用）：{result[:600]}")
+                trace.append(f"#{step} 工具 {name} 返回（优先使用）：{result[:1800]}")
                 continue
 
             answer = clean(raw)
