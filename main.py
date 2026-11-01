@@ -195,6 +195,7 @@ class AOS:
                 prompt += "\n\n最近两步：\n" + "\n".join(trace[-2:])
 
             action = None
+            fault_targets: list[str] = []
             out_tokens = int(os.environ.get("AOS_OUT_TOKENS", "3000"))
             for attempt in range(2):
                 raw = await self.kernel.chat(
@@ -206,6 +207,11 @@ class AOS:
                     ],
                     max_tokens=out_tokens if attempt == 0 else 1200,
                 )
+                wanted = protocol.faults(raw.text)
+                if wanted:
+                    fault_targets = wanted
+                    break
+
                 action = protocol.parse(raw.text)
                 if not (action.name == "done" and str(action.args.get("summary", "")).startswith("无法解析")):
                     break
@@ -215,13 +221,28 @@ class AOS:
                     action = salvaged
                     break
                 self.emit(f"[重试] 输出不合法，第 {attempt + 2} 次")
+            if fault_targets:
+                await self._page_fault(fault_targets, guard)
+                continue
+
+            if action is None:
+                continue
+
+            if action.name == "invalid":
+                bad = action.args.get("name") or "非 JSON"
+                hint = "[系统] 动作不合法：" + str(bad)
+                if str(bad) == "read":
+                    hint += "。read 已废弃，需要文件内容请输出 <|PAGE_FAULT: 文件名|>"
+                else:
+                    hint += "。只输出一个合法 JSON 动作，或 done"
+                trace.append(hint)
+                self.emit(f"[退回] {hint[:70]}", cls="err")
+                continue
+
             obs = await self.executor.run(action.name, action.args)
             guard.observe(action.name, action.args, obs.ok)
 
-            if action.name == "read" and obs.ok:
-                src = str(action.args.get("path", ""))
-                self.mmu.add(f"{src}\n{obs.text}"[:1500], vec=self._vec(obs.text[:800]),
-                             importance=0.6, tag="file", source=src)
+
             trace.append(f"#{rnd} {action.name} -> {str(obs)[:300]}")
 
             nudge = guard.intervention()
@@ -252,6 +273,24 @@ class AOS:
 
         u = self.kernel.usage
         self.emit(f"任务结束（{len(trace)} 步，累计 {u.total} tokens）")
+
+    async def _page_fault(self, targets: list[str], guard) -> None:
+        """缺页中断：把目标文件换入内存，LRU 自动踢掉最老的页。"""
+
+        for target in targets[:3]:
+            active = [p for p in self.mmu._pages.values()
+                      if p.source == target and p.state.value == "active" and not p.stale]
+            if active:
+                self.emit(f"[缺页] {target} 已在内存（页 #{active[0].page_id}），不重复换入", cls="sys")
+                continue
+            obs = self.executor.read_internal(target)
+            if not obs.ok:
+                self.emit(f"[缺页] 寻址失败：{target}", cls="err")
+                continue
+            page = self.mmu.add(obs.text[:1500], vec=self._vec(obs.text[:800]),
+                                importance=0.95, tag="pagefault", source=target)
+            guard.observe("fault", {"path": target}, True)
+            self.emit(f"[缺页中断] 换入 {target} → 页 #{page.page_id}", cls="fault")
 
     def _is_doc_task(self, summary: str) -> bool:
         return ("readme" in summary.lower() or ".md" in summary.lower()) and ("写" in summary or "生成" in summary)

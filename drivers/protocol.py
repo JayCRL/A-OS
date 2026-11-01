@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 
-ACTION_NAMES = {"read", "write", "append", "list", "search", "shell", "mcp", "done"}
+ACTION_NAMES = {"write", "append", "list", "search", "shell", "mcp", "done"}
 
 SYSTEM = """你是 A-OS 的内核进程，只能通过动作与世界交互。
 
@@ -17,7 +17,6 @@ SYSTEM = """你是 A-OS 的内核进程，只能通过动作与世界交互。
 {"action": "read|write|list|search|shell|done", ...}
 
 参数：
-- read   {"action":"read","path":"相对路径"}
 - write  {"action":"write","path":"相对路径","content":"内容"}
 - append {"action":"append","path":"相对路径","content":"追加内容"}
 - list   {"action":"list","path":"相对路径，可为 ."}
@@ -25,6 +24,11 @@ SYSTEM = """你是 A-OS 的内核进程，只能通过动作与世界交互。
 - shell  {"action":"shell","cmd":"命令"}   # 仅限白名单命令
 - mcp    {"action":"mcp","server":"服务名","tool":"工具名","arguments":{}}
 - done   {"action":"done","summary":"本轮结论"}
+
+缺页协议（重要）：
+你没有 read 工具。上下文里没有的文件内容，不许猜，必须停下来要页：
+  单独输出一行 <|PAGE_FAULT: 文件名或关键词|>
+内核会把对应内容换入内存，然后继续叫你。
 
 规则：
 1. 路径一律相对工作根目录，禁止 .. 和绝对路径
@@ -66,9 +70,9 @@ def parse(text: str) -> Action:
         name = str(obj.get("action", "")).strip().lower()
         if name in ACTION_NAMES:
             return Action(name, obj)
-        return Action("done", {"summary": f"未知动作 {name}"})
+        return Action("invalid", {"name": name})
 
-    return Action("done", {"summary": f"无法解析：{text[:120]}"})
+    return Action("invalid", {"name": "", "raw": text[:120]})
 
 
 def salvage(text: str) -> Action | None:
@@ -87,3 +91,12 @@ def salvage(text: str) -> Action | None:
     body = re.sub(r'"\s*\}\s*$', "", body)
     body = body.replace("\\n", "\n").replace('\\"', '"')
     return Action("append", {"path": pm.group(1), "content": body})
+
+
+_FAULT_RE = re.compile(r"<\|PAGE_FAULT:\s*([^|>]+?)\s*\|>")
+
+
+def faults(text: str) -> list[str]:
+    """从模型输出里抠出所有缺页请求。"""
+
+    return [m.strip() for m in _FAULT_RE.findall(text or "") if m.strip()]

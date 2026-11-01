@@ -80,6 +80,14 @@ class Executor:
         except Exception as exc:  # noqa: BLE001
             return Observation(False, f"{type(exc).__name__}: {exc}")
 
+    def read_internal(self, path: str) -> Observation:
+        """供 MMU 缺页换入使用，不是模型可调的动作。"""
+
+        try:
+            return self._read({"path": path})
+        except Exception as exc:  # noqa: BLE001
+            return Observation(False, str(exc))
+
     async def _locked(self, args: dict, fn) -> Observation:
         if self.path_locks is None:
             return fn(args)

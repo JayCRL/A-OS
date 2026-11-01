@@ -89,6 +89,11 @@
   #terminal .ln { padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
   #terminal .ln.sys { color: var(--amber); }
   #terminal .ln.err { color: var(--red); }
+  #terminal .ln.fault { color: var(--cyan); text-shadow: 0 0 8px rgba(0,255,255,.35); }
+  #terminal .ln.fault::before { content: "⚡ "; color: var(--cyan); }
+  @keyframes flyin { from { transform: translateX(26px); opacity: 0; } to { transform: none; opacity: 1; } }
+  .pg.fresh { animation: flyin .35s ease-out; border-color: var(--cyan) !important;
+              box-shadow: 0 0 14px -4px var(--cyan); }
   #terminal .ln::before { content: "› "; color: #23421f; }
 
   .pg {
@@ -196,7 +201,7 @@
 const $ = (id) => document.getElementById(id);
 const el = { dag: $('dag'), term: $('terminal'), pages: $('pages') };
 const stat = { nodes: $('s-nodes'), pages: $('s-pages'), tokens: $('s-tokens'), run: $('s-run'), workers: $('s-workers') };
-let ws = null, retry = 0, lastLogLen = -1, pinnedBottom = true;
+let ws = null, retry = 0, lastLogLen = -1, pinnedBottom = true, seenPages = new Set();
 
 function wsBase() {
   const p = location.pathname.replace(/\/[^/]*$/, '').replace(/\/$/, '');
@@ -312,6 +317,15 @@ function render(s) {
     `${p.source ? `<span class="src">${esc(p.source)}</span>` : ''}` +
     `${p.pinned ? '<span class="pin">PIN</span>' : ''}</div>` +
     `<div class="txt">${esc(p.preview)}</div></div>`).join('');
+
+  document.querySelectorAll('#pages .pg').forEach((node, i) => {
+    const p = (s.pages || [])[i];
+    if (p && !seenPages.has(p.id)) {
+      node.classList.add('fresh');
+      setTimeout(() => node.classList.remove('fresh'), 900);
+    }
+  });
+  (s.pages || []).forEach(p => seenPages.add(p.id));
 
   const logs = s.log || [];
   if (logs.length !== lastLogLen) {
