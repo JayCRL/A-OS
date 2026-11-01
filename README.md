@@ -2,10 +2,59 @@
 
 把操作系统的内存管理与进程调度搬进 LLM Agent 的运行时：上下文不是一段不断变长的 `messages` 数组，而是一块可以被换页、可以被淘汰、可以按段隔离的虚拟内存。
 
+```mermaid
+flowchart TB
+    subgraph 入口
+        A1[终端 / WebSocket] --> A2[IO Spooler<br/>2 秒防抖合并]
+    end
+
+    A2 --> B1
+
+    subgraph 内核
+        B1[调度器<br/>优先级队列 · 协程取消]
+        B2[上下文组装<br/>段页式]
+        B3[动作执行<br/>读写 · shell · MCP]
+        B4[看门狗<br/>重复动作 · 预算]
+        B1 --> B2 --> B3 --> B4
+        B4 -.-> B1
+    end
+
+    subgraph 状态
+        C1[PageTable<br/>SYSTEM / HUMAN / DAG / DATA]
+        C2[StateDAG<br/>CoW · 剪枝]
+        C3[Journal<br/>检查点 · 租约]
+    end
+
+    B2 <--> C1
+    B3 --> C2
+    B1 <--> C3
+    C1 --> D1[缺页中断<br/>磁盘 / 向量索引]
+    D1 --> C1
+
+    subgraph 集群
+        E1[Redis 队列] --> E2[Worker 1]
+        E1 --> E3[Worker 2]
+    end
+    B1 -.-> E1
 ```
-用户输入 → 事件合并 → 调度器 → 内核循环 → 动作执行 → 状态树 / 页表
-                        ↑                          ↓
-                    看门狗 / 检查点 / 锁        控制台（WebSocket）
+
+### 缺页流程
+
+```mermaid
+sequenceDiagram
+    participant M as 模型
+    participant K as 内核
+    participant P as 页表
+    participant S as 磁盘 / 向量索引
+
+    M->>K: <|PAGE_FAULT: mathx.py|>
+    K->>P: 该文件在内存里吗
+    P-->>K: 不在
+    K->>S: 按路径找，找不到走语义检索
+    S-->>K: 文件内容
+    K->>P: 换入新页（DATA 段）
+    P->>P: 超过 5 页，LRU 换出最老的 DATA
+    K->>M: 带着新页继续推理
 ```
 
 ## 它解决什么
