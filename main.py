@@ -96,6 +96,13 @@ class AOS:
                 page.content = clean[:1500]
                 self.mmu._persist(page)
                 fixed += 1
+        dag_fixed = 0
+        for node in list(self.dag._nodes.values()):
+            clean = sanitize.strip_json(node.content)
+            if clean and clean != node.content:
+                self.dag.update_content(node.node_id, clean[:200])
+                dag_fixed += 1
+
         dropped = 0
         for page in list(self.mmu._pages.values()):
             text = page.content.replace("人类指令：", "").strip()
@@ -107,6 +114,8 @@ class AOS:
             self.emit(f"[净化] 清理 {fixed} 页里的原始指令日志", cls="sys")
         if dropped:
             self.emit(f"[净化] 丢弃 {dropped} 页闲聊垃圾", cls="sys")
+        if dag_fixed:
+            self.emit(f"[净化] 清理 {dag_fixed} 个状态节点里的原始日志", cls="sys")
 
     def _recover(self) -> None:
         pending = self.journal.recover()

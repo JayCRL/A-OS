@@ -175,6 +175,14 @@ class StateDAG:
         c["total"] = len(self._nodes)
         return c
 
+    def update_content(self, node_id: int, content: str) -> None:
+        node = self._nodes.get(node_id)
+        if not node:
+            return
+        node.content = content
+        self._conn.execute("UPDATE nodes SET content=? WHERE node_id=?", (content, node_id))
+        self._conn.commit()
+
     def _settle(self, node: Node) -> None:
         self._conn.execute(
             "UPDATE nodes SET status=? WHERE node_id=?", (node.status.value, node.node_id)
