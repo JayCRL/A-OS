@@ -26,6 +26,7 @@ from drivers.embedding import load_encoder
 from kernel.executor import Executor
 from kernel.shell_sandbox import ShellSandbox
 from kernel.depgraph import DepGraph
+from kernel.lock import PathLocks
 from drivers.mcp_client import McpRegistry
 from kernel.progress import ProgressTracker
 from kernel.journal import Journal
@@ -49,9 +50,11 @@ class AOS:
         self.sandbox = ShellSandbox(self.home / "workspace", allow_shell := True) if False else ShellSandbox(self.home / "workspace")
         self.mcp = McpRegistry(Path("/opt/aos/mcp.json"))
         self.depgraph = DepGraph.build(self.home / "workspace")
+        self.path_locks = self._make_locks()
         self.executor = Executor(self.home / "workspace", allow_shell=True,
                                  sandbox=self.sandbox, mcp=self.mcp,
-                                 on_write=self._on_file_written)
+                                 on_write=self._on_file_written,
+                                 path_locks=self.path_locks)
         self.max_rounds = int(os.environ.get("AOS_MAX_ROUNDS", "6"))
         self.encoder = load_encoder()
         self.journal = Journal(self.home / "tasks.db")
@@ -327,6 +330,15 @@ class AOS:
 
     _tree_cache: str | None = None
 
+    def _make_locks(self):
+        try:
+            from cluster.broker import Broker
+            import redis.asyncio as aioredis
+            client = aioredis.from_url("redis://127.0.0.1:6379/0", decode_responses=True)
+            return PathLocks(redis_client=client, lock_dir=self.home / "locks", owner=self.home.name)
+        except Exception:
+            return PathLocks(lock_dir=self.home / "locks", owner=self.home.name)
+
     def snapshot(self) -> dict:
         nodes = sorted(self.dag._nodes.values(), key=lambda n: n.node_id)[-40:]
         pages = sorted(self.mmu._pages.values(), key=lambda p: p.page_id)[-30:]
@@ -340,6 +352,7 @@ class AOS:
             "tokens": self.kernel.usage.total,
             "running": len(self.sched.stats()["running"]),
             "workers": getattr(self, "_workers", 0),
+            "locks": self.path_locks.stats(),
         }
 
     async def watch_workers(self) -> None:

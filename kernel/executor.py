@@ -27,7 +27,7 @@ class Observation:
 
 class Executor:
     def __init__(self, root: Path, *, allow_shell: bool = False, guard=None,
-                 sandbox=None, mcp=None, on_write=None) -> None:
+                 sandbox=None, mcp=None, on_write=None, path_locks=None) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.allow_shell = allow_shell
@@ -35,6 +35,7 @@ class Executor:
         self.sandbox = sandbox
         self.mcp = mcp
         self.on_write = on_write
+        self.path_locks = path_locks
 
     # ---------- 路径安全 ----------
 
@@ -57,9 +58,9 @@ class Executor:
                     return Observation(False, blocked)
                 return self._read(args)
             if name == "write":
-                return self._write(args)
+                return await self._locked(args, self._write)
             if name == "append":
-                return self._append(args)
+                return await self._locked(args, self._append)
             if name == "list":
                 blocked = self.guard.blocks_list(args.get("path", ".")) if self.guard else None
                 if blocked:
@@ -78,6 +79,13 @@ class Executor:
             return Observation(False, str(exc))
         except Exception as exc:  # noqa: BLE001
             return Observation(False, f"{type(exc).__name__}: {exc}")
+
+    async def _locked(self, args: dict, fn) -> Observation:
+        if self.path_locks is None:
+            return fn(args)
+        path = str(args.get("path", ""))
+        async with self.path_locks.hold(path):
+            return fn(args)
 
     def _read(self, args: dict) -> Observation:
         path = self._resolve(args.get("path", ""))
