@@ -47,6 +47,8 @@ def parse_tool(text: str) -> tuple[str, dict] | None:
             return str(obj.get("tool") or obj.get("action")), dict(obj)
         if isinstance(obj, dict) and ("tasks" in obj or ("task" in obj and "success" not in obj)):
             return "agent", dict(obj)
+        if isinstance(obj, dict) and ("phases" in obj or "steps" in obj):
+            return "workflow", dict(obj)
     return None
 
 
@@ -161,6 +163,49 @@ class AgentProcess:
                             result = f"子代理 #{child.pid}：{await self.k.wait(child.pid, timeout=120)}"
                         except Exception as exc:  # noqa: BLE001
                             result = f"子代理失败：{type(exc).__name__}: {exc}"
+                elif name == "workflow":
+                    phases = args.get("phases") or args.get("steps") or []
+                    depth = int(proc.payload.get("depth", 0) or 0)
+                    if depth >= 2:
+                        result = "错误：子代理层级过深"
+                    elif not isinstance(phases, list) or not phases:
+                        result = "错误：workflow 需要 phases"
+                    else:
+                        chunks: list[str] = []
+                        previous = ""
+                        for idx, phase in enumerate(phases[:5], 1):
+                            if isinstance(phase, str):
+                                phase = {"name": f"阶段{idx}", "tasks": [phase]}
+                            if not isinstance(phase, dict):
+                                continue
+                            pname = str(phase.get("name") or f"阶段{idx}")
+                            raw = phase.get("tasks") or (
+                                [phase.get("task")] if phase.get("task") else []
+                            )
+                            if isinstance(raw, str):
+                                raw = [raw]
+                            tasks = [str(t).strip() for t in raw if str(t).strip()][:4]
+                            if not tasks:
+                                continue
+                            before = previous
+                            sem = asyncio.Semaphore(3)
+
+                            async def run_one(t: str, _before=before) -> str:
+                                full = t if not _before else (
+                                    f"前序阶段结果：\n{_before}\n\n当前任务：{t}"
+                                )
+                                async with sem:
+                                    try:
+                                        return await self._spawn_child(
+                                            full, proc.pid, depth + 1
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        return f"失败：{type(exc).__name__}: {exc}"
+
+                            outs = await asyncio.gather(*(run_one(t) for t in tasks))
+                            previous = f"[{pname}]\n" + "\n".join(outs)
+                            chunks.append(previous)
+                        result = "\n\n".join(chunks) or "错误：workflow 没有可执行阶段"
                 else:
                     result = await self.bus.call("vfs", "run", name=name, args=args)
                 if len(result) > 4000:
@@ -213,6 +258,15 @@ class AgentProcess:
         await self.bus.call("kernel", "journal_finish", task_id=task_id, status="done")
         await self.bus.call("librarian", "observe", user=text, answer=answer)
         return answer
+
+    async def _spawn_child(self, task: str, parent: int, depth: int) -> str:
+        async def _child(child_proc, mk, _task=task):
+            return await AgentProcess(mk).run_turn(child_proc, _task)
+
+        child = await self.k.spawn(
+            "subagent", _child, parent=parent, payload={"depth": depth},
+        )
+        return f"#{child.pid} {await self.k.wait(child.pid, timeout=120)}"
 
     async def _force_answer(self, prompt: str) -> str:
         try:

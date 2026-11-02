@@ -50,6 +50,35 @@ class FactModel:
         return ModelReply("好，记住了。", Usage(10, 5))
 
 
+class WorkflowModel:
+    ready = True
+
+    def __init__(self) -> None:
+        self.usage = Usage()
+        self.calls = 0
+
+    async def chat(self, messages, *, max_tokens=512, temperature=0.3):
+        system = str(messages[0].get("content", ""))
+        body = str(messages[-1].get("content", ""))
+        if "编目器" in system:
+            return ModelReply('{"noise": true}', Usage(10, 5))
+        self.calls += 1
+        if "任务A" in body:
+            return ModelReply("A结果", Usage(10, 5))
+        if "任务B" in body:
+            return ModelReply("B结果", Usage(10, 5))
+        if "任务C" in body:
+            return ModelReply("C汇总", Usage(10, 5))
+        if self.calls == 1:
+            return ModelReply(
+                '{"tool":"workflow","phases":['
+                '{"name":"调研","tasks":["任务A","任务B"]},'
+                '{"name":"汇总","task":"任务C"}]}',
+                Usage(10, 10),
+            )
+        return ModelReply("总结：A结果 / B结果 / C汇总", Usage(10, 5))
+
+
 class FanoutModel:
     ready = True
 
@@ -234,6 +263,17 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         answer = await self.mk.ask("把 note.txt 里的 alpha 改成 beta")
         self.assertEqual(answer, "改完了。")
         self.assertEqual((self.home / "workspace" / "note.txt").read_text(), "beta\n")
+
+    async def test_workflow_runs_phases_in_order(self) -> None:
+        model = WorkflowModel()
+        self.mk.model = model
+        self.mk.librarian.model = model
+        answer = await self.mk.ask("按阶段调研并汇总")
+        self.assertIn("A结果", answer)
+        self.assertIn("C汇总", answer)
+        procs = await self.mk.bus.call("kernel", "processes")
+        subs = [p for p in procs if p["name"] == "subagent" and p["state"] == "done"]
+        self.assertGreaterEqual(len(subs), 3, procs)
 
     async def test_parallel_subagents_fanout(self) -> None:
         model = FanoutModel()
