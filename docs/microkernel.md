@@ -161,6 +161,24 @@ recall=3/3  broad_recall=3/3  add=0.37s
 
 这是召回基线，不是回答质量基线。
 
+## 外部壳接入（DSH）
+
+A-OS 提供两个只读/回写接口：
+
+```
+POST /api/memory/recall  {text,budget} -> {context,tokens,pages}
+POST /api/memory/commit  {session,user,answer}
+```
+
+DSH 侧用原生 Cordis 插件接入，不是 MCP：
+
+- `agent/pre-step`（step 1）→ recall → 把 memory block 作为 snapshot 消息注入；
+- `agent/turn-stopping` → commit → episode/facts；
+- 超时静默降级，不阻塞 DSH；
+- 插件在 `integrations/dsh-plugin/`，独立 profile 安装。
+
+边界：DSH 管执行上下文（当前轮/工具/plan），A-OS 管长期记忆；暂不接管 DSH compaction。
+
 ## 工程工具
 
 VFS 现在提供：
