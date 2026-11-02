@@ -1,8 +1,8 @@
 # A-OS
 
-把操作系统的内存管理与进程调度搬进 LLM Agent 的运行时：上下文不是一段不断变长的 `messages` 数组，而是一块可以被换页、被淘汰、按段隔离的虚拟内存。
+把操作系统的**虚拟内存、进程隔离、按需换页**搬进 LLM Agent 的运行时。
 
-但用户不该看见这些。对用户来说，它就是一个能接话、记性很好的助手：
+上下文不是一段不断变长的 `messages`，而是一块有预算、能换入换出、按进程隔离的虚拟内存。用户看不到页表，只感觉它“记得住、接得上、不会越聊越傻”。
 
 ```
 你 > 记住，dya 星期一回来
@@ -14,160 +14,286 @@ A-OS > 好，记住了。周一不给你排事。
 A-OS > 星期一。
 ```
 
-内核在下面跑，日志在文件里，界面只有对话。想看机制，终端 `/state` 或网页右上角 `⋯`。
+想看机制：网页右上角 `⋯`，或 `?debug=1`。
 
-## 总览
+---
+
+## 60 秒认识
+
+现在 A-OS 同时有两层：
+
+| 层 | 做什么 |
+|---|---|
+| **微内核** | 进程、调度、IPC、段页式上下文、换入换出、服务拆分 |
+| **记忆** | 长期事实/偏好/计划、图节点、文件块、空闲巩固、事实失效 |
+| **Agent** | 工具调用、计划、子代理、阶段 workflow、自动验收 |
+
+它不是一个“更大的 prompt”，也不是纯 RAG：
+
+- 相关信息在**调模型前自动换入**，不靠模型发缺页、也不靠模型主动调记忆工具；
+- 页表按 `pid` 隔离，不同会话/子代理有各自工作集；
+- 长期记忆不删除，只降权/失效；
+- 工具能真读、真改、真跑，不是只给建议。
+
+---
+
+## 架构
 
 ```
-用户说话
-  ↓
-IO 事件 → 调度器（每回合一个任务，并发上限 3）
-  ↓
-状态树：这一轮做到哪了（抽象状态，不是原始 JSON）
-  ↓
-段页式上下文（SYSTEM / HUMAN / DAG_STATE / DATA，预算 8000 token）
-  ↓
-模型
-  ├─ 直接说话 ────────────────→ 回复用户
-  ├─ <|PAGE_FAULT: 目标|> ────→ 缺页：磁盘 / 语义索引 / 长期记忆
-  └─ {"tool": ...} ──────────→ 工具：文件 / 搜索 / 网页
-  ↓
-看门狗：重复动作、步数上限、空转
-  ↓
-回答入页（DAG_STATE）→ 下一轮还在
-  ↓
-后台：抽长期记忆、归档旧对话
+用户 / Web / DSH 壳
+        │
+        ▼
+┌─────────────────────────────────────────────┐
+│ kernel（微内核）                             │
+│  Dispatcher   输入 → 复用会话进程 / 新建     │
+│  进程表        ready/running/waiting/done    │
+│  调度器        短任务 worker + 会话常驻 loop │
+│  IPC           Unix socket JSON-RPC          │
+│  状态树        DAG_STATE / journal           │
+└───────────────┬─────────────────────────────┘
+                │
+     ┌──────────┼──────────┐
+     ▼          ▼          ▼
+   pager     librarian     vfs
+   页表       抽取/图      文件/网页
+   记忆       巩固         索引/DMA
+   图检索
 ```
 
-## 机制
+split 模式下是四个真实进程：
 
-### 分页与分段
+```
+python3 mk_main.py --web --port 8799 --split
+  ├─ kernel
+  ├─ services.worker pager
+  ├─ services.worker librarian
+  └─ services.worker vfs
+```
+
+同进程模式用于测试和单机调试。
+
+---
+
+## 虚拟记忆
+
+### 分段
 
 `kernel/page_table.py`，落盘在 `pages.db`：
 
 | 段 | 内容 | 策略 |
 |---|---|---|
-| SYSTEM | 人格、工具协议、时间 | 常驻，永不换出 |
-| HUMAN | 当前人类指令 | 本轮必带 |
-| DAG_STATE | 最近几轮对话、任务状态 | 常驻，超过 6 页降级 |
-| DATA | 文件片段、长期记忆、旧对话 | 按分数换入换出 |
+| SYSTEM | 人格、协议、时间 | 常驻，不换出 |
+| HUMAN | 当前用户指令 | 本轮必带 |
+| DAG_STATE | 最近对话、任务状态 | 常驻，超限降级 |
+| DATA | 文件块、图节点、长期记忆、旧对话 | 按分数换入换出 |
 
-- 一页不是定长行，而是一个语义块（文件片段 / 一条记忆 / 一轮对话）。
-- `compose()` 每次重新拼：固定段 + 常驻页 + DATA 里按 `相似度 + 字面重合 + 新鲜度 + 重要度` 选的 Top-K。
-- **总预算硬约束**：固定段和常驻页先扣，剩下的才给 DATA；超了就从低分页换出，不整段清空。
-- 旧对话不会每轮被清掉：上一轮的 HUMAN 降成 DAG_STATE，更旧的降成 DATA，相关时还能被召回。
+- 一页是语义块，不是定长行；
+- `compose()` 用 `相似度 + 字面 + 新鲜度 + 重要度` 选 DATA；
+- 总预算硬约束（默认 8000 token）；超了换出低分页，不清空整段；
+- 上一轮 HUMAN 降为 DAG_STATE，更旧的降为 DATA，需要时还能召回；
+- **每个 pid 一张页表**，共享 SYSTEM，不共享 HUMAN/DAG/DATA。
 
-### 缺页中断
+### 自动预取，不是模型缺页
 
-模型不知道文件内容时，不猜，输出：
+一轮开始：
 
 ```
-<|PAGE_FAULT: login.md|>
-<|PAGE_FAULT: 上次说的那个登录接口|>
+begin_turn(pid, text)
+  → 当前指令进 HUMAN
+  → 身份/偏好进 DATA
+  → 最近对话进 DAG
+
+prefetch(pid, query)
+  → GraphRetriever 找相关项目/模块/任务节点
+  → VFS 语义索引找文件块
+  → 长期记忆多路召回
+  → 全部变成当前 pid 的 DATA 页
+
+compose(pid, query, budget)
+  → 按段拼装、按预算裁剪
+  → 模型只看到已经装好的上下文
 ```
 
-内核按顺序找：
+模型不知道“页”的存在，也不需要输出 `<|PAGE_FAULT|>` 或调用 `read` 才能拿到上下文。
+文件工具是**能力**，不是换页入口。
 
-1. 工作区文件 → 直接读；
-2. 同一 source 的页已在内存 → 只 `swap_in`，不重复建页；
-3. 自然语言 → 工作区向量索引 + 长期记忆召回，命中的片段建成 DATA 页。
+### 会话进程
 
-没有 `read` 工具：读文件内容一律走缺页，这样"什么时候换、换多少"由内核预算决定，而不是模型一次性把整份文件倒进上下文。
+`kernel/dispatcher.py`：
 
-换入的页本轮钉在 `must_include` 里，不会再被同轮淘汰。文件改过 → 依赖页 `stale`，下次重新换入。缺页次数会记在状态和调试面板里。
+- 同一个 channel 默认复用最近的会话进程；
+- 只有明确“新任务/新话题/重新开始”才新建；
+- 会话空闲 10 分钟过期；
+- 会话 loop 是独立 asyncio task，不占调度 worker；
+- 真正跑一轮时才占用 turn 信号量（并发 3）。
 
-### 状态树
+---
 
-`kernel/state_dag.py`，落盘在 `dag.db`：
+## Agent 能力
 
-- 每个节点是**抽象状态**：`用户：…`、`已换入 login.md`、`web_search "…" → 命中 3 条`、`回答：…`。
-- 不存原始 JSON，不存完整文件内容。
-- 每步 checkpoint；`prune()` 成功后归档旁支，只留主干。
-- 上下文里的「最近状态」就是这个主干，不是一整段聊天记录。
+### 工具
 
-### 看门狗
+VFS 提供：
 
-`kernel/progress.py`：
+```
+read    list    glob    grep    search
+write   append  edit    shell   verify
+web_search      web_fetch
+```
 
-- 同一个缺页目标 / 同一个工具连续 3 次 → 注入中断，要求换目标或直接回答；
-- 步数到 8 → 强制收尾，让模型用一两句话回答；
-- 只提醒和叫停，不再"第一次 write 就逼 done"。
+- `shell` 走工作区白名单沙箱，30 秒超时，输出截断；
+- `edit` 精确替换，改完失效对应页；
+- `verify` 自动识别 `pytest / package.json / compileall`；
+- 代码文件 `edit` 后自动跑一次 verify，结果回灌；
+- 没有实际调用 `write/edit/shell` 却声称“改好了”，会被系统打回一次。
 
-### 调度与恢复
+### 计划、子代理、workflow
 
-- `kernel_scheduler.py`：优先级队列 + 最大并发 3 + 可取消；每个用户回合是一个任务。
-- `journal.py`：任务租约、断点、重启恢复。重启时未完成的任务标记失败，不会假装续跑。
-- `executor` / `tools.py`：文件路径锁在工作区，写文件原子替换，写完让相关页失效。
+- `plan/todo`：步骤写进进程状态，每轮注入；
+- `agent/task`：派生一个 child pid，父进程等待汇总；
+- `agent/tasks`：最多 4 个子任务并行 fan-out，并发 3；
+- `workflow/phases`：阶段内并行、阶段间串行，前序结果注入后一阶段；
+- 子代理最多两层，避免无限套娃。
 
-### 长期记忆
+工具步数上限 **24**，够走“读 → 改 → 跑 → 修”。
+
+---
+
+## 长期记忆
 
 `kernel/memory.py`，`brain.db`：
 
-- 六类：`identity / preference / fact / plan / episode / summary`。
-- 每轮后台静默提取；重复的按向量相似度合并。
-- 召回打分：`0.58*向量 + 0.14*字面 + 0.08*新鲜度 + 0.20*重要度 + 稀有片段加成`，MMR 去重。
-- 身份/偏好每轮固定带上；其余按需变成 DATA 页换入。
-- **库里的记忆不删**。放不进上下文的只是"这次不带"。
+```
+identity / preference / fact / plan / episode / summary
+```
 
-## 图记忆（实验）
+- 每轮 librarian 抽 facts（身份/偏好/事实/计划）；
+- 重复记忆按向量相似度合并；
+- 冲突用 `superseded / valid_to` 标记失效，不删除；
+- 未被引用的记忆缓慢衰减（只降可提取性）；
+- 身份/偏好每轮固定带上，其余按需换入；
+- 召回：`0.58*向量 + 0.14*字面 + 0.08*新鲜 + 0.20*重要度 + 稀有片段加成`，MMR 去重。
 
-这一层是"磁盘"的候选实现：把无限长的 episode 流水压成一张轻量图。
+### 空闲巩固
 
-- 图里只放 `project / module / task / decision / lesson / artifact / concept`，不放聊天轮次；
-- 失败试错进 `trials` 表，成功才折叠成 task 的 `artifact` / `lessons` 属性；
-- 上层 `parent_id` 骨架树 + 下层模块内局部图，度上限 12；
-- 谱坐标用归一化拉普拉斯的最小非零特征值，不把"最大特征值"当树；
-- 检索：别名/向量锚点 → 骨架路径 → 局部 1~2 跳 → 谱重排 → 3~5 个节点。
+不是固定每 8 轮切一刀，而是**空闲时像休息一样巩固**：
 
-10k 轮合成压测：**251 个节点、2000 条 trials 不进图、每次换入 5 个节点（316 token）**。
+```
+队列为空
+且不在处理/不在巩固
+且未巩固 >= 4 条
+且距离最后一次对话 >= 10 分钟
+  → consolidation
+```
+
+兜底：未巩固 >= 40 条，即使没到 10 分钟也压一次。
+
+巩固输出：
+
+```
+summary / facts / supersedes / open_tasks / topics
+  → summary 进 MemoryStore
+  → facts 进 profile
+  → supersedes 让旧事实失效
+  → 原文 episode 保留
+```
+
+### 记忆事件
+
+`memory_events` 记录每轮：
+
+```
+ts, pid, query, page_ids, used_ids, outcome, tokens, latency
+```
+
+用于后续 bandit/归因；`used_ids` 和 `outcome` 目前先留空，不假装有奖励。
+
+---
+
+## 图记忆
+
+`kernel/graph.py`：
+
+- 只放 `project / module / task / decision / lesson / artifact / concept`，不放聊天轮次；
+- 失败试错进 `trials`，成功才折叠成 task 的 `artifact / lessons`；
+- 上层 `parent_id` 骨架树 + 局部图，度上限 12；
+- 谱坐标用归一化拉普拉斯的最小非零特征值；
+- 检索：别名/向量锚点 → 骨架路径 → 1~2 跳 → 谱重排 → 3~5 个节点。
+
+图现在是 pager 的自动预取来源之一，不再只是独立引擎。
+
+---
+
+## Web 与可观测
 
 ```bash
-python3 -m unittest tests.test_graph -v
-python3 tests/synthetic_graph.py
+python3 mk_main.py --web --port 8799 --split
 ```
 
-现在还是独立引擎，没接对话 Agent 和页表；接入方案见 [docs/graph-memory.md](docs/graph-memory.md)。
+- 聊天：`http://127.0.0.1:8799/`
+- 调试抽屉：右上角 `⋯` 或 `?debug=1`
+- 面板每 2 秒刷新：服务灯、进程卡片、会话卡片、记忆环图、页表分段条、最近回答
+- 终端模式：`/state`、`/memory`、`/help`、`/quit`
 
-## 用户看到什么
+公开部署示例：`https://11408.online/aos/`（nginx 代理 `/aos/` → `127.0.0.1:8799`）。
 
-终端：
+---
 
-```
-A-OS 在。
-你 > 我 plan.md 里写了什么？
-本周就两件事：周三评审接口，周五交周报。周一空着，正好。
-```
+## 接 DSH 产品层
 
-网页是一个聊天窗口，没有状态树、页表、token 计数。右上角 `⋯` 是维护者抽屉，才看得到：
-
-```
-状态树 12 节点 · 成功 8
-页表 活跃 5 / 换出 7
-缺页 1   本轮步数 3
-```
-
-终端命令：
+A-OS 可以作为 DSH 的“记忆内核”：
 
 ```
-/state    内核状态（状态树 / 页表 / 缺页）
-/memory   记忆条数与最近几条
-/debug    内部日志开关（默认写 logs/aos.log）
-/reset    换新话题（记忆保留）
-/quit     退出
+DSH：UI / agent loop / tools / skills / 审批 / 子代理
+A-OS：长期记忆 / 图 / 文件块 / 事实失效 / 空闲巩固
 ```
 
-## 跑起来
+不是 MCP。DSH 侧用原生 Cordis 插件：
+
+- `agent/pre-step`（step 1）→ `POST /api/memory/recall` → 注入 memory block；
+- `agent/turn-stopping` → `POST /api/memory/commit` → episode/facts；
+- 超时静默降级，不阻塞 DSH。
+
+插件在 [`integrations/dsh-plugin/`](integrations/dsh-plugin/)，独立 profile 安装，不改 DSH 核心。
+
+---
+
+## 快速开始
 
 ```bash
+cd /opt/aos-mk
 pip install -r requirements.txt
-cd /opt/aos
-python3 main.py                    # 终端
-python3 main.py --web --port 8799  # 网页
+
+# 终端
+python3 mk_main.py
+
+# Web + split 服务
+AOS_HOME=/opt/aos/data python3 mk_main.py --web --port 8799 --split
 ```
 
-可选：把 `bge-small-zh-v1.5` 放到 `models/bge-small-zh/`（`model.onnx` + `tokenizer.json`），语义召回更准；没有这个目录会自动退化成哈希编码，功能不断。
+可选：把 `bge-small-zh-v1.5` 放到 `models/bge-small-zh/`（`model.onnx` + `tokenizer.json`）；没有会自动退化为哈希编码。
 
 模型 Key 读 `DEEPSEEK_API_KEY` 或 `~/.dsh/.env`。
+
+### systemd
+
+```ini
+[Unit]
+Description=A-OS Microkernel Web
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/aos-mk
+Environment=AOS_HOME=/opt/aos/data
+Environment=PYTHONPATH=/opt/aos-mk
+ExecStart=/usr/bin/python3 /opt/aos-mk/mk_main.py --web --port 8799 --split
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+---
 
 ## 配置
 
@@ -179,76 +305,98 @@ python3 main.py --web --port 8799  # 网页
 | `AOS_DEBUG` | 空 | 内部日志同时打终端 |
 | `DEEPSEEK_API_KEY` | 读 `~/.dsh/.env` | 模型 Key |
 
+数据目录：
+
 ```
 data/
-  brain.db     记忆 + 对话
-  pages.db     页表
-  dag.db       状态树
-  tasks.db     任务日志/租约
-  chunks.db    工作区文件向量索引
-  workspace/   它能读写的文件
-  logs/aos.log 内部日志
+  brain.db      记忆 + 对话 + memory_events
+  pages.db      页表
+  dag.db        状态树
+  tasks.db      任务日志/租约
+  chunks.db     工作区文件向量索引
+  graph.db      图记忆
+  workspace/    它能读写的文件
+  logs/         worker 日志
 ```
 
-## 代码结构
+---
 
-```
-kernel/
-  agent.py            回合：调度 → 组页 → 模型 → 缺页/工具 → 看门狗 → 落页
-  page_table.py       分页 / 分段 / 换入换出 / compose
-  state_dag.py        状态树
-  progress.py         看门狗
-  kernel_scheduler.py 调度器
-  journal.py          租约与恢复
-  memory.py           长期记忆
-  dialogue.py         全量对话史
-  tools.py            文件 / 搜索 / 网页
-  memindex.py         工作区文件切块与语义索引
-  persona.py          提示词
-  tokens.py           token 估算
-web/
-  server.py           聊天接口 + 调试接口
-  index.html          聊天界面（调试抽屉默认收起）
-main.py               入口
-tests/
-  test_chat.py        17 个用例
-  test_graph.py       8 个图记忆用例
-  synthetic_graph.py  1 万轮合成压测
-  smoke_live.py       真实模型冒烟
-```
-
-## 测试
+## 测试与基线
 
 ```bash
-cd /opt/aos
-python3 -m unittest tests.test_chat tests.test_graph -v
-python3 tests/synthetic_graph.py
+python3 -m unittest tests.test_chat tests.test_graph tests.test_microkernel
+# 58 tests
 ```
 
-覆盖：
-
-- 分页 / 分段 / 预算 / 换出
-- `_persist` 真的更新 `segment/source/stale`（旧版这里漏了，重启会复活）
-- 缺页换入文件、同一个 source 去重、文件改过后旧页失效
-- 状态树节点与最近对话页
-- 看门狗拦住重复缺页
-- 记忆写入/召回/去重、300 条重启后还在
-- 20 轮后上下文仍在预算内
-- 工具调用不出现在回答里
-- CLI 不打印内核日志
-- Web 页面与接口
-
-真实模型冒烟：
+记忆基线：
 
 ```bash
-python3 tests/smoke_live.py
+python3 -m tests.bench_memory
 ```
+
+```
+1000 条：needle recall 20/20，平均 18 ms，上下文 58.6 tok
+5000 条：needle recall 20/20，平均 141 ms，上下文 61.0 tok
+```
+
+线上任务冒烟：
+
+```bash
+python3 -m tests.bench_live
+```
+
+```
+read / edit / verify / remember / recall / web
+success 6/6
+avg wall 3.09s
+avg tokens 2104
+```
+
+完整结果和局限见 [docs/benchmark.md](docs/benchmark.md)。
+
+**注意**：合成 needle 是词面暗号，flat vector 也满分；它证明“5000 条能在预算内命中”，不证明“语义上强于别人”。语义改写、1000 轮长对话、与 DSH/Mem0 的同题 A/B 还没做。
+
+---
+
+## 当前状态与边界
+
+已落地：
+
+- 段页式上下文、per-pid 页表、换入换出；
+- 自动预取图/文件/记忆，不走模型缺页；
+- Dispatcher 会话复用、常驻会话进程；
+- 空闲 consolidation、facts、supersede、decay；
+- read/glob/grep/edit/shell/verify；
+- plan、subagent、并行 fan-out、workflow；
+- DSH 原生插件桥。
+
+边界：
+
+- 子代理最多两层；workflow 是线性阶段，不是 DAG；
+- shell 只限工作区/白名单，不是完整终端；
+- 没有浏览器自动化、MCP 工具市场；
+- 没有流式工具卡片/diff/审批 UI；
+- 记忆巩固要等空闲，回答当下可能还没消化；
+- 语义召回和千轮对话还缺严格评测。
+
+---
+
+## 路线
+
+1. 语义改写 needle + 1000 轮长对话基准；
+2. 与 flat RAG / DSH 原生上下文做同题 A/B；
+3. 记忆 bandit（alpha/beta、引用归因、衰减）；
+4. 自动修复循环（verify 失败回灌直到通过或超预算）；
+5. workflow DAG + 结果去重/投票；
+6. 更完整的权限、审计和流式 UI。
+
+---
 
 ## 设计取舍
 
-上一版有两个极端：内核日志直接糊在用户脸上；或者干脆不要内核、退化成聊天 loop。这一版把两件事分开：
+上一版有两个极端：内核日志糊在用户脸上，或者干脆退化成聊天 loop。现在把两件事分开：
 
-- **机制保留**：分页、分段、缺页、状态树、看门狗、调度、租约都还在，而且真的在链路上起作用。
-- **呈现收起来**：正常对话只输出回答；机制进日志和调试面板。
+- **机制保留**：分页、分段、调度、状态树、租约、记忆、图、巩固都真的在链路上；
+- **呈现收起来**：正常对话只给回答，机制进日志和调试面板。
 
-页表这一层也修了上一版的硬伤：`compose` 不再把没选中的 DATA 全换出；缺页按 `source` 去重；`segment/source/stale` 会落库；token 按中文实际字数估，不再 `len/3` 低估三倍。
+页表也修过几个硬伤：`compose` 不再把没选中的 DATA 全换出；文件改过页会失效；`segment/source/stale` 会落库；预算按实际 token 估，不再严重低估。
