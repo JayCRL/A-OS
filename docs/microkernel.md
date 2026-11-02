@@ -173,7 +173,8 @@ web_search  web_fetch
 
 - `shell` 走工作区白名单沙箱，30 秒超时，输出截断；
 - `edit` 精确替换，改完失效对应页缓存；
-- AgentProcess 工具步数上限 24，够走"读→改→跑→修"。
+- AgentProcess 工具步数上限 24，够走"读→改→跑→修"；
+- 没实际调用 edit/write/shell 时，回答里声称"改好了"会被系统打回一次。
 
 ## 实时进程/记忆面板
 
