@@ -45,6 +45,8 @@ def parse_tool(text: str) -> tuple[str, dict] | None:
             continue
         if isinstance(obj, dict) and (obj.get("tool") or obj.get("action")):
             return str(obj.get("tool") or obj.get("action")), dict(obj)
+        if isinstance(obj, dict) and ("tasks" in obj or ("task" in obj and "success" not in obj)):
+            return "agent", dict(obj)
     return None
 
 
