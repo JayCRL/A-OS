@@ -70,13 +70,17 @@ class Tools:
             elif name == "list":
                 out = await asyncio.to_thread(self._list, str(args.get("path", ".")))
             elif name == "glob":
-                out = await asyncio.to_thread(self._glob, str(args.get("pattern", "**/*")))
+                pattern = args.get("pattern") or args.get("query") or args.get("glob") or "**/*"
+                out = await asyncio.to_thread(self._glob, str(pattern))
             elif name == "grep":
                 out = await asyncio.to_thread(self._grep, str(args.get("query", args.get("pattern", ""))),
                                               str(args.get("path", ".")))
             elif name == "edit":
-                out = await asyncio.to_thread(self._edit, str(args.get("path", "")),
-                                              str(args.get("old", "")), str(args.get("new", "")))
+                out = await asyncio.to_thread(
+                    self._edit, str(args.get("path", "")),
+                    str(args.get("old", args.get("old_string", ""))),
+                    str(args.get("new", args.get("new_string", ""))),
+                )
             elif name == "shell":
                 out = await self._shell(str(args.get("cmd", args.get("command", ""))))
             elif name == "search":
