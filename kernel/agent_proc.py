@@ -14,7 +14,7 @@ from kernel.process import Process
 from kernel.tokens import estimate_tokens
 
 _LEADING = re.compile(r"^\s*(A-OS|a-os|助手)\s*[:：]\s*")
-MAX_STEPS = 8
+MAX_STEPS = 24
 
 
 def clean(text: str) -> str:
@@ -106,7 +106,7 @@ class AgentProcess:
                     used_web = True
                     if "出错了" in result or "没有返回结果" in result:
                         trace.append("[系统] 联网失败了，换关键词再搜一次；再不行再用 web_fetch 打开具体网页。")
-                if name in ("write", "append"):
+                if name in ("write", "append", "edit"):
                     path = str(args.get("path", ""))
                     await self.bus.call("pager", "invalidate", source=path)
                 await self.bus.call("kernel", "state_add", pid=proc.pid,

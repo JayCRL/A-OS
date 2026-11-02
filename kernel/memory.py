@@ -65,6 +65,8 @@ class Memory:
     refs: int = 0
     source: str = ""
     vec: np.ndarray | None = None
+    superseded: bool = False
+    valid_to: float | None = None
 
     @property
     def tokens(self) -> int:
@@ -96,6 +98,14 @@ class MemoryStore:
             """
         )
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_mem_kind ON memories(kind)")
+        for ddl in (
+            "ALTER TABLE memories ADD COLUMN superseded INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE memories ADD COLUMN valid_to REAL",
+        ):
+            try:
+                self._conn.execute(ddl)
+            except sqlite3.OperationalError:
+                pass
         self._conn.commit()
         self._cache: list[Memory] = []
         self._index: dict[int, Memory] = {}
@@ -110,12 +120,14 @@ class MemoryStore:
 
     def _load(self) -> None:
         rows = self._conn.execute(
-            "SELECT id, text, kind, ts, importance, refs, source, vec FROM memories ORDER BY id"
+            "SELECT id, text, kind, ts, importance, refs, source, vec, superseded, valid_to"
+            " FROM memories ORDER BY id"
         ).fetchall()
         self._cache = [
             Memory(
                 id=r[0], text=r[1], kind=r[2], ts=r[3], importance=r[4], refs=r[5],
                 source=r[6], vec=np.frombuffer(r[7], dtype=np.float32).copy() if r[7] else None,
+                superseded=bool(r[8]), valid_to=r[9],
             )
             for r in rows
         ]
@@ -295,7 +307,7 @@ class MemoryStore:
         cands: list[tuple[float, float, Memory]] = []
         for idx, mid in enumerate(ids):
             mem = self._by_id(mid)
-            if mem is None or mem.kind not in (kinds or ("episode", "summary", "fact", "plan", "preference", "identity")):
+            if mem is None or mem.superseded or mem.kind not in (kinds or ("episode", "summary", "fact", "plan", "preference", "identity")):
                 continue
             if mem.id in exclude_ids:
                 continue
@@ -350,7 +362,7 @@ class MemoryStore:
     def profile(self, *, limit: int = 8, max_tokens: int = 600) -> list[Memory]:
         """稳定信息：身份、偏好。每次对话都带上，不靠检索碰运气。"""
 
-        rows = [m for m in self._cache if m.kind in ("identity", "preference")]
+        rows = [m for m in self._cache if not m.superseded and m.kind in ("identity", "preference")]
         rows.sort(key=lambda m: (m.importance, m.ts), reverse=True)
         out: list[Memory] = []
         used = 0
@@ -362,7 +374,7 @@ class MemoryStore:
         return out
 
     def recent(self, *, limit: int = 10, kinds: Sequence[str] = ("fact", "plan", "preference", "identity")) -> list[Memory]:
-        rows = [m for m in self._cache if m.kind in kinds]
+        rows = [m for m in self._cache if not m.superseded and m.kind in kinds]
         rows.sort(key=lambda m: m.ts, reverse=True)
         return rows[:limit]
 
@@ -374,11 +386,58 @@ class MemoryStore:
 
     # ---------- 维护 ----------
 
+    def supersede(self, text: str, *, threshold: float = 0.55,
+                  kinds: Sequence[str] = ("fact", "plan", "preference", "identity")) -> int:
+        """把与 text 相近的旧事实标记为失效；不删除。"""
+
+        text = (text or "").strip()
+        if not text:
+            return 0
+        vec = _normalize(self.encoder.encode_one(text))
+        now = time.time()
+        changed = 0
+        for mem in self._cache:
+            if mem.superseded or mem.kind not in kinds or mem.vec is None:
+                continue
+            cos = float(mem.vec @ vec)
+            lex = _lexical(text, mem.text)
+            if cos < threshold and lex < threshold:
+                continue
+            mem.superseded = True
+            mem.valid_to = now
+            self._conn.execute(
+                "UPDATE memories SET superseded=1, valid_to=? WHERE id=?", (now, mem.id)
+            )
+            changed += 1
+        if changed:
+            self._conn.commit()
+        return changed
+
+    def decay(self, factor: float = 0.995, *, min_importance: float = 0.05) -> int:
+        """只降低可提取性，不删除；长期未引用的记忆缓慢衰减。"""
+
+        changed = 0
+        for mem in self._cache:
+            if mem.superseded or mem.refs > 0:
+                continue
+            new = max(min_importance, mem.importance * factor)
+            if abs(new - mem.importance) > 1e-6:
+                mem.importance = new
+                self._conn.execute("UPDATE memories SET importance=? WHERE id=?", (new, mem.id))
+                changed += 1
+        if changed:
+            self._conn.commit()
+        return changed
+
     def stats(self) -> dict:
         by_kind: dict[str, int] = {}
         for m in self._cache:
             by_kind[m.kind] = by_kind.get(m.kind, 0) + 1
-        return {"total": len(self._cache), "by_kind": by_kind}
+        return {
+            "total": len(self._cache),
+            "superseded": sum(1 for m in self._cache if m.superseded),
+            "by_kind": by_kind,
+        }
 
     def close(self) -> None:
         self._conn.close()

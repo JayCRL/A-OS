@@ -88,6 +88,10 @@ class PagerService:
         if method == "recent_history":
             return [{"id": t.id, "role": t.role, "text": t.text, "ts": t.ts}
                     for t in self.dialogue.recent(limit=int(params.get("limit", 20)))]
+        if method == "supersede_facts":
+            return {"changed": self.memory.supersede(str(params.get("text", "")))}
+        if method == "decay_memory":
+            return {"changed": self.memory.decay(float(params.get("factor", 0.995)))}
         if method == "commit_summary":
             return self.commit_summary(str(params.get("text", "")), str(params.get("scope", "session")))
         if method == "log_event":

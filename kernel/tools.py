@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from kernel.memindex import MemoryIndex
+from kernel.shell_sandbox import ShellSandbox
 
 MAX_READ = 12000
 MAX_OUTPUT = 5000
@@ -25,13 +26,17 @@ TEXT_EXT = {
 }
 UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 
-DESCRIPTION = """read {"path":"README.md"}          读工作区文件
-list {"path":"."}                     列目录
-search {"query":"关键词"}             在工作区里找内容
-write {"path":"a.md","content":"..."} 新建/覆盖文件（用户明确要产出时才用）
-append {"path":"note.txt","content":"..."} 追加
-web_search {"query":"..."}            联网搜索
-web_fetch {"url":"https://..."}       打开网页取正文"""
+DESCRIPTION = """read {"path":"README.md"}                      读工作区文件
+list {"path":"."}                             列目录
+glob {"pattern":"**/*.py"}                    按通配符找文件
+grep {"query":"TODO","path":"."}              按正则搜内容
+search {"query":"关键词"}                     在工作区里做语义检索
+write {"path":"a.md","content":"..."}         新建/覆盖文件
+append {"path":"note.txt","content":"..."}    追加
+edit {"path":"a.py","old":"x","new":"y"}      精确替换
+shell {"cmd":"pytest -q"}                     在工作区跑命令（白名单）
+web_search {"query":"..."}                    联网搜索
+web_fetch {"url":"https://..."}               打开网页取正文"""
 
 
 @dataclass
@@ -40,11 +45,14 @@ class Tools:
     encoder: object | None = None
     index: MemoryIndex | None = None
     on_write: object | None = None
+    shell: ShellSandbox | None = None
     calls: list[dict] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         self.root = Path(self.root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
+        if self.shell is None:
+            self.shell = ShellSandbox(self.root)
         if self.index is None and self.encoder is not None:
             try:
                 self.index = MemoryIndex(self.root.parent / "chunks.db", self.encoder, self.root)
@@ -61,6 +69,16 @@ class Tools:
                 out = await asyncio.to_thread(self._read, str(args.get("path", "")))
             elif name == "list":
                 out = await asyncio.to_thread(self._list, str(args.get("path", ".")))
+            elif name == "glob":
+                out = await asyncio.to_thread(self._glob, str(args.get("pattern", "**/*")))
+            elif name == "grep":
+                out = await asyncio.to_thread(self._grep, str(args.get("query", args.get("pattern", ""))),
+                                              str(args.get("path", ".")))
+            elif name == "edit":
+                out = await asyncio.to_thread(self._edit, str(args.get("path", "")),
+                                              str(args.get("old", "")), str(args.get("new", "")))
+            elif name == "shell":
+                out = await self._shell(str(args.get("cmd", args.get("command", ""))))
             elif name == "search":
                 out = await asyncio.to_thread(self._search, str(args.get("query", args.get("keyword", ""))))
             elif name == "write":
@@ -133,6 +151,69 @@ class Tools:
         if len(text) > MAX_READ:
             text = text[:MAX_READ] + f"\n…（已截断，全文 {len(text)} 字符）"
         return f"{rel}\n{text}"
+
+    def _glob(self, pattern: str) -> str:
+        pattern = (pattern or "**/*").strip().lstrip("/")
+        rows = []
+        for path in self.root.glob(pattern):
+            if path.is_file() and (path == self.root or self.root in path.parents):
+                rows.append("./" + str(path.relative_to(self.root)))
+            if len(rows) >= 200:
+                break
+        return "\n".join(sorted(rows)) or "（没有匹配文件）"
+
+    def _grep(self, pattern: str, path: str = ".") -> str:
+        pattern = (pattern or "").strip()
+        if not pattern:
+            return "错误：搜索内容为空"
+        base = self._resolve(path)
+        files = [base] if base.is_file() else [
+            p for p in base.rglob("*")
+            if p.is_file() and p.suffix.lower() in TEXT_EXT
+            and ".git" not in p.parts and "node_modules" not in p.parts
+        ]
+        try:
+            rx = re.compile(pattern, re.I)
+        except re.error:
+            rx = re.compile(re.escape(pattern), re.I)
+        rows = []
+        for file in files:
+            try:
+                lines = file.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except Exception:
+                continue
+            for no, line in enumerate(lines, 1):
+                if rx.search(line):
+                    rel = file.relative_to(self.root)
+                    rows.append(f"{rel}:{no}: {line.strip()[:220]}")
+                    if len(rows) >= 60:
+                        return "\n".join(rows)
+        return "\n".join(rows) or "（没有匹配）"
+
+    def _edit(self, path: str, old: str, new: str) -> str:
+        if not old:
+            return "错误：old 不能为空"
+        target = self._resolve(path)
+        if not target.is_file():
+            return f"错误：文件不存在 {path}"
+        text = target.read_text(encoding="utf-8", errors="ignore")
+        count = text.count(old)
+        if count == 0:
+            return f"错误：没有找到要替换的内容（{path}）"
+        target.write_text(text.replace(old, new), encoding="utf-8")
+        if self.on_write:
+            try:
+                self.on_write(str(target.relative_to(self.root)))
+            except Exception:
+                pass
+        return f"已替换 {count} 处：{path}"
+
+    async def _shell(self, cmd: str) -> str:
+        cmd = (cmd or "").strip()
+        if not cmd:
+            return "错误：命令为空"
+        result = await self.shell.run(cmd)
+        return f"$ {cmd}\n{result.output}"
 
     def _list(self, path: str) -> str:
         target = self._resolve(path)

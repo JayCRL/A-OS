@@ -180,6 +180,37 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(stats["processes"].get("total", 0), 1, stats)
         self.assertGreaterEqual(stats["processes"].get("waiting", 0), 1, stats)
 
+    async def test_engineering_tools_read_edit_grep_shell(self) -> None:
+        run = lambda name, **args: self.mk.bus.call("vfs", "run", name=name, args=args)
+        out = await run("write", path="calc.py", content="def add(a, b):\n    return a + b\n")
+        self.assertIn("已写入", out)
+        text = await run("read", path="calc.py")
+        self.assertIn("def add", text)
+        found = await run("grep", query="return", path=".")
+        self.assertIn("calc.py", found)
+        edited = await run("edit", path="calc.py", old="a + b", new="a - b")
+        self.assertIn("已替换", edited)
+        self.assertIn("a - b", await run("read", path="calc.py"))
+        matched = await run("glob", pattern="**/*.py")
+        self.assertIn("calc.py", matched)
+        shell = await run("shell", cmd='python3 -c "print(6*7)"')
+        self.assertIn("42", shell)
+
+    async def test_superseded_fact_not_recalled(self) -> None:
+        await self.mk.bus.call("pager", "commit_memory", items=[
+            {"text": "用户住在北京", "kind": "fact", "importance": 0.8},
+        ])
+        await self.mk.bus.call("pager", "supersede_facts", text="用户住在上海")
+        await self.mk.bus.call("pager", "commit_memory", items=[
+            {"text": "用户住在上海", "kind": "fact", "importance": 0.8},
+        ])
+        stats = await self.mk.bus.call("pager", "stats")
+        self.assertGreaterEqual(stats["memory"].get("superseded", 0), 1, stats)
+        hits = self.mk.pager.memory.recall("用户住在哪", k=8)
+        texts = [m.text for _s, m in hits]
+        self.assertFalse(any("北京" in t for t in texts), texts)
+        self.assertTrue(any("上海" in t for t in texts), texts)
+
     async def test_memory_events_and_consolidation(self) -> None:
         model = SummaryModel()
         self.mk.model = model

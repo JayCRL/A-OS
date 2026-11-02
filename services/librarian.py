@@ -249,9 +249,13 @@ class LibrarianService:
                 await self.backend.call("pager", "commit_summary", text=summary, scope="session")
                 self.summaries += 1
                 self.last_summary = summary[:200]
+            for old in list(data.get("supersedes") or []):
+                if str(old).strip():
+                    await self.backend.call("pager", "supersede_facts", text=str(old))
             facts = list(data.get("facts") or [])
             if facts:
                 await self.backend.call("pager", "commit_memory", items=facts)
+            await self.backend.call("pager", "decay_memory", factor=0.995)
             self._unconsolidated = 0
             self._last_activity = time.time()
         except asyncio.CancelledError:
