@@ -50,6 +50,31 @@ class FactModel:
         return ModelReply("好，记住了。", Usage(10, 5))
 
 
+class FanoutModel:
+    ready = True
+
+    def __init__(self) -> None:
+        self.usage = Usage()
+        self.calls = 0
+
+    async def chat(self, messages, *, max_tokens=512, temperature=0.3):
+        system = str(messages[0].get("content", ""))
+        body = str(messages[-1].get("content", ""))
+        if "编目器" in system:
+            return ModelReply('{"noise": true}', Usage(10, 5))
+        self.calls += 1
+        if "任务A" in body:
+            return ModelReply("结果A", Usage(10, 5))
+        if "任务B" in body:
+            return ModelReply("结果B", Usage(10, 5))
+        if self.calls == 1:
+            return ModelReply(
+                '{"tool":"agent","tasks":["任务A：查登录","任务B：查越权"]}',
+                Usage(10, 10),
+            )
+        return ModelReply("汇总：结果A / 结果B", Usage(10, 5))
+
+
 class ConflictModel:
     ready = True
 
@@ -209,6 +234,17 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         answer = await self.mk.ask("把 note.txt 里的 alpha 改成 beta")
         self.assertEqual(answer, "改完了。")
         self.assertEqual((self.home / "workspace" / "note.txt").read_text(), "beta\n")
+
+    async def test_parallel_subagents_fanout(self) -> None:
+        model = FanoutModel()
+        self.mk.model = model
+        self.mk.librarian.model = model
+        answer = await self.mk.ask("并行调研 A 和 B")
+        self.assertIn("结果A", answer)
+        self.assertIn("结果B", answer)
+        procs = await self.mk.bus.call("kernel", "processes")
+        subs = [p for p in procs if p["name"] == "subagent" and p["state"] == "done"]
+        self.assertGreaterEqual(len(subs), 2, procs)
 
     async def test_plan_tool_persists_in_process(self) -> None:
         model = ScriptModel([

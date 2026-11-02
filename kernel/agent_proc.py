@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -117,17 +118,42 @@ class AgentProcess:
                     )
                 elif name in ("agent", "subagent"):
                     task = str(args.get("task") or args.get("prompt") or "").strip()
+                    tasks = args.get("tasks") or []
+                    if isinstance(tasks, str):
+                        tasks = [tasks]
+                    tasks = [str(t).strip() for t in tasks if str(t).strip()][:4]
                     depth = int(proc.payload.get("depth", 0) or 0)
-                    if not task:
-                        result = "错误：子任务为空"
-                    elif depth >= 2:
+                    if depth >= 2:
                         result = "错误：子代理层级过深"
+                    elif tasks:
+                        sem = asyncio.Semaphore(3)
+
+                        async def run_one(idx: int, sub: str) -> str:
+                            async def _child(child_proc, mk, _task=sub):
+                                return await AgentProcess(mk).run_turn(child_proc, _task)
+
+                            async with sem:
+                                try:
+                                    child = await self.k.spawn(
+                                        "subagent", _child, parent=proc.pid,
+                                        payload={"depth": depth + 1},
+                                    )
+                                    out = await self.k.wait(child.pid, timeout=120)
+                                    return f"[子任务 {idx}] {out}"
+                                except Exception as exc:  # noqa: BLE001
+                                    return f"[子任务 {idx}] 失败：{type(exc).__name__}: {exc}"
+
+                        result = "\n".join(await asyncio.gather(
+                            *(run_one(i, sub) for i, sub in enumerate(tasks, 1))
+                        ))
+                    elif not task:
+                        result = "错误：子任务为空"
                     else:
-                        async def _child(child_proc, mk, _task=task):
+                        async def _one(child_proc, mk, _task=task):
                             return await AgentProcess(mk).run_turn(child_proc, _task)
                         try:
                             child = await self.k.spawn(
-                                "subagent", _child, parent=proc.pid,
+                                "subagent", _one, parent=proc.pid,
                                 payload={"depth": depth + 1},
                             )
                             result = f"子代理 #{child.pid}：{await self.k.wait(child.pid, timeout=120)}"
