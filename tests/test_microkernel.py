@@ -462,6 +462,37 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pages, "没有显式缺页时也应自动换入 VFS 文件块")
         self.assertTrue(any(p.source.startswith("file:") for p in pages))
 
+    async def test_trigger_queue_dedupe_and_priority(self) -> None:
+        from kernel.triggers import TriggerStore
+
+        store = TriggerStore(self.home / "triggers-test.db")
+        first, created = store.push(source="github", kind="comment",
+                                    payload={"text": "修复登录"}, dedupe_key="pr-1")
+        self.assertTrue(created)
+        second, created2 = store.push(source="github", kind="comment",
+                                      payload={"text": "修复登录"}, dedupe_key="pr-1")
+        self.assertFalse(created2)
+        self.assertEqual(first.id, second.id)
+        store.push(source="im", kind="message", payload={"text": "普通"},
+                   priority=1, dedupe_key="im-1")
+        rows = store.list()
+        self.assertEqual(rows[0].priority, 1)
+        store.finish(first.id, status="done", result="ok")
+        self.assertEqual(store.get(first.id).status, "done")
+        store.close()
+
+    async def test_trigger_spawns_worker(self) -> None:
+        model = EchoModel()
+        self.mk.model = model
+        self.mk.librarian.model = model
+        out = await self.mk.emit_trigger(
+            source="github", kind="comment",
+            payload={"text": "登录越权怎么修"}, thread_id="pr-1",
+        )
+        self.assertEqual(out["status"], "done")
+        self.assertTrue(out["result"])
+        self.assertEqual(self.mk.trigger_stats().get("done"), 1)
+
     async def test_memory_bridge_methods(self) -> None:
         self.mk.pager.memory.add("用户喜欢青竹", kind="fact", importance=0.8)
         out = await self.mk.recall_memory("我喜欢什么")

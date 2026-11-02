@@ -21,6 +21,7 @@ from kernel.journal import Journal
 from kernel.kernel_scheduler import Job, KernelScheduler
 from kernel.process import ProcState, Process, ProcessTable
 from kernel.spool import Spool
+from kernel.triggers import TriggerStore
 from kernel.state_dag import StateDAG
 from kernel.unix_ipc import RemoteBus, UnixClient
 from services.librarian import LibrarianService
@@ -63,6 +64,7 @@ class Microkernel:
         self.sched = KernelScheduler(max_workers=8)
         self.dispatcher = Dispatcher()
         self.spool = Spool(self.home)
+        self.triggers = TriggerStore(self.home / "triggers.db")
         self._workers: list[asyncio.subprocess.Process] = []
         self._clients: dict[str, UnixClient] = {}
         self._history_cache: list[dict] = []
@@ -190,6 +192,7 @@ class Microkernel:
             await self.pager.close()
         self.dag.close()
         self.journal.close()
+        self.triggers.close()
         self._state = "stopped"
 
     async def _stop_workers(self) -> None:
@@ -318,6 +321,47 @@ class Microkernel:
             self.table.set_state(proc.pid, ProcState.DONE)
             self._session_tasks.pop(proc.pid, None)
 
+    async def emit_trigger(self, *, source: str, kind: str, payload: dict | None = None,
+                           thread_id: str = "", priority: int = 0,
+                           dedupe_key: str = "") -> dict:
+        """外部事件入队；去重后派生一个 trigger-worker 执行。"""
+        trig, is_new = self.triggers.push(
+            source=source, kind=kind, payload=payload, thread_id=thread_id,
+            priority=priority, dedupe_key=dedupe_key,
+        )
+        if not is_new and trig.status in ("running", "done"):
+            return self._trigger_dict(trig)
+        if not self.triggers.claim(trig.id, 0):
+            return self._trigger_dict(self.triggers.get(trig.id) or trig)
+
+        from kernel.agent_proc import AgentProcess
+
+        text = str((payload or {}).get("text") or (payload or {}).get("message") or
+                   f"[{source}/{kind}] {thread_id}").strip()
+
+        async def routine(proc, mk):
+            return await AgentProcess(mk).run_turn(proc, text)
+
+        try:
+            proc = await self.spawn("trigger-worker", routine,
+                                    payload={"trigger_id": trig.id, "thread": thread_id})
+            answer = await self.wait(proc.pid, timeout=120)
+            self.triggers.finish(trig.id, status="done", result=str(answer))
+        except Exception as exc:  # noqa: BLE001
+            self.triggers.finish(trig.id, status="failed",
+                                 result=f"{type(exc).__name__}: {exc}")
+        return self._trigger_dict(self.triggers.get(trig.id) or trig)
+
+    def _trigger_dict(self, trig) -> dict:
+        return {
+            "id": trig.id, "source": trig.source, "kind": trig.kind,
+            "thread_id": trig.thread_id, "status": trig.status,
+            "priority": trig.priority, "result": trig.result,
+        }
+
+    def trigger_stats(self) -> dict:
+        return self.triggers.stats()
+
     async def reply(self, text: str) -> str:
         return await self.ask(text, channel="web")
 
@@ -435,6 +479,7 @@ class Microkernel:
                 "bus": self.bus.stats() if self.bus else {},
                 "services": self.bus.endpoints() if self.bus else [],
                 "dispatcher": self.dispatcher.stats(),
+                "triggers": self.trigger_stats(),
                 "pager": graph,
                 "pages": pages,
                 "memory": memory,
@@ -469,6 +514,7 @@ class Microkernel:
             "bus": self.bus.stats(),
             "services": self.bus.endpoints(),
             "dispatcher": self.dispatcher.stats(),
+            "triggers": self.trigger_stats(),
             "pager": self.pager.graph.stats(),
             "pages": self.pager.mmu.stats(),
             "memory": self.pager.memory.stats(),

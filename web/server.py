@@ -67,6 +67,28 @@ def make_app(agent) -> web.Application:
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
+    async def trigger_post(request):
+        data = await request.json()
+        try:
+            out = await agent.emit_trigger(
+                source=str(data.get("source", "external")),
+                kind=str(data.get("kind", "event")),
+                payload=dict(data.get("payload") or {}),
+                thread_id=str(data.get("thread_id", "")),
+                priority=int(data.get("priority", 0)),
+                dedupe_key=str(data.get("dedupe_key", "")),
+            )
+            return web.json_response({"ok": True, **out})
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def triggers(_req):
+        return web.json_response({"stats": agent.trigger_stats(), "items": [
+            {"id": t.id, "source": t.source, "kind": t.kind, "thread_id": t.thread_id,
+             "status": t.status, "priority": t.priority, "result": t.result}
+            for t in agent.triggers.list(limit=50)
+        ]})
+
     async def debug(_req):
         return web.json_response(agent.debug_snapshot())
 
@@ -101,6 +123,8 @@ def make_app(agent) -> web.Application:
     app.router.add_get("/api/debug", debug)
     app.router.add_post("/api/memory/recall", memory_recall)
     app.router.add_post("/api/memory/commit", memory_commit)
+    app.router.add_post("/api/trigger", trigger_post)
+    app.router.add_get("/api/triggers", triggers)
     app.router.add_get("/ws", ws_handler)
     return app
 
