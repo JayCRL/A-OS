@@ -196,6 +196,20 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(stats["processes"].get("total", 0), 1, stats)
         self.assertGreaterEqual(stats["processes"].get("waiting", 0), 1, stats)
 
+    async def test_edit_claim_is_forced_to_call_tool(self) -> None:
+        (self.home / "workspace").mkdir(parents=True, exist_ok=True)
+        (self.home / "workspace" / "note.txt").write_text("alpha\n", encoding="utf-8")
+        model = ScriptModel([
+            "改好了。",
+            '{"tool":"edit","path":"note.txt","old":"alpha","new":"beta"}',
+            "改完了。",
+        ])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        answer = await self.mk.ask("把 note.txt 里的 alpha 改成 beta")
+        self.assertEqual(answer, "改完了。")
+        self.assertEqual((self.home / "workspace" / "note.txt").read_text(), "beta\n")
+
     async def test_engineering_tools_read_edit_grep_shell(self) -> None:
         run = lambda name, **args: self.mk.bus.call("vfs", "run", name=name, args=args)
         out = await run("write", path="calc.py", content="def add(a, b):\n    return a + b\n")

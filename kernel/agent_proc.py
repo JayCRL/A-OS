@@ -75,6 +75,8 @@ class AgentProcess:
         last_pages: list[int] = []
         used_web = False
         web_nudged = False
+        used_write = False
+        write_nudged = False
 
         for step in range(1, MAX_STEPS + 1):
             dag = (await self.bus.call("kernel", "state_render", pid=proc.pid,
@@ -102,6 +104,8 @@ class AgentProcess:
                 result = await self.bus.call("vfs", "run", name=name, args=args)
                 if len(result) > 4000:
                     result = result[:4000].rsplit("\n", 1)[0]
+                if name in ("write", "append", "edit", "shell"):
+                    used_write = True
                 if name in ("web_search", "web_fetch"):
                     used_web = True
                     if "出错了" in result or "没有返回结果" in result:
@@ -122,6 +126,11 @@ class AgentProcess:
             if not used_web and not web_nudged and any(x in answer for x in refusal):
                 web_nudged = True
                 trace.append("[系统] 你有 web_search / web_fetch 工具，不要说不能联网；先调用工具查。")
+                continue
+            wrote = ("改好", "已改", "修改好", "写好了", "已写入", "替换好", "已替换")
+            if not used_write and not write_nudged and any(x in answer for x in wrote):
+                write_nudged = True
+                trace.append("[系统] 你还没有实际调用 write/edit/shell，不能声称已经改了；请先调用工具。")
                 continue
             break
 
