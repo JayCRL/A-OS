@@ -264,7 +264,8 @@ class AgentProcess:
             return await AgentProcess(mk).run_turn(child_proc, _task)
 
         child = await self.k.spawn(
-            "subagent", _child, parent=parent, payload={"depth": depth},
+            "subagent", _child, parent=parent,
+            payload={"depth": depth, "role": "worker"},
         )
         return f"#{child.pid} {await self.k.wait(child.pid, timeout=120)}"
 

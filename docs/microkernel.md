@@ -177,7 +177,10 @@ source/kind/payload/thread_id/priority/dedupe_key
 - 优先级：`priority DESC, id ASC`；
 - 外部入口：`POST /api/trigger`；
 - 查询：`GET /api/triggers`；
-- 当前未接 Router，worker 结果只回写 trigger。
+- `emit_trigger` 把事件交给 `channel=router` 的 Router 进程；
+- Router 可以派 `role=worker` 的子代理；
+- 结果回写 trigger，不直接回用户；
+- Watchdog 每 10s 检查 running trigger，超时标 failed。
 
 ## 外部壳接入（DSH）
 

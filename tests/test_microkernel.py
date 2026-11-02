@@ -481,6 +481,19 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(store.get(first.id).status, "done")
         store.close()
 
+    async def test_watchdog_fails_stale_trigger(self) -> None:
+        trig, _ = self.mk.triggers.push(
+            source="github", kind="comment", payload={"text": "卡住"}, dedupe_key="stale-1",
+        )
+        self.assertTrue(self.mk.triggers.claim(trig.id, 0))
+        self.mk.triggers._conn.execute(
+            "UPDATE triggers SET updated_at=0 WHERE id=?", (trig.id,)
+        )
+        self.mk.triggers._conn.commit()
+        await self.mk.watchdog.tick()
+        self.assertEqual(self.mk.triggers.get(trig.id).status, "failed")
+        self.assertGreaterEqual(self.mk.watchdog.stats()["failed_triggers"], 1)
+
     async def test_trigger_spawns_worker(self) -> None:
         model = EchoModel()
         self.mk.model = model
@@ -492,6 +505,8 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["status"], "done")
         self.assertTrue(out["result"])
         self.assertEqual(self.mk.trigger_stats().get("done"), 1)
+        procs = await self.mk.bus.call("kernel", "processes")
+        self.assertTrue(any(p.get("role") == "router" for p in procs), procs)
 
     async def test_memory_bridge_methods(self) -> None:
         self.mk.pager.memory.add("用户喜欢青竹", kind="fact", importance=0.8)

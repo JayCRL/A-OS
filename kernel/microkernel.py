@@ -22,6 +22,7 @@ from kernel.kernel_scheduler import Job, KernelScheduler
 from kernel.process import ProcState, Process, ProcessTable
 from kernel.spool import Spool
 from kernel.triggers import TriggerStore
+from kernel.watchdog import Watchdog
 from kernel.state_dag import StateDAG
 from kernel.unix_ipc import RemoteBus, UnixClient
 from services.librarian import LibrarianService
@@ -65,6 +66,7 @@ class Microkernel:
         self.dispatcher = Dispatcher()
         self.spool = Spool(self.home)
         self.triggers = TriggerStore(self.home / "triggers.db")
+        self.watchdog = Watchdog(self)
         self._workers: list[asyncio.subprocess.Process] = []
         self._clients: dict[str, UnixClient] = {}
         self._history_cache: list[dict] = []
@@ -103,6 +105,7 @@ class Microkernel:
             await self._boot_split()
             await self.sched.start()
             self._state = "running"
+            self.watchdog.start()
             return
         self.bus.register("kernel", self)
         self.bus.register("pager", self.pager)
@@ -115,6 +118,7 @@ class Microkernel:
         await self.vfs.boot()
         await self.sched.start()
         self._state = "running"
+        self.watchdog.start()
 
     async def _boot_split(self) -> None:
         ipc = self.home / "ipc"
@@ -190,6 +194,7 @@ class Microkernel:
             await self.bus.stop()
             await self.vfs.close()
             await self.pager.close()
+        await self.watchdog.stop()
         self.dag.close()
         self.journal.close()
         self.triggers.close()
@@ -265,7 +270,9 @@ class Microkernel:
         session, is_new = self.dispatcher.route(text, channel=channel)
         proc = self.table.get(session.pid) if session.pid is not None else None
         if is_new or proc is None or proc.state in (ProcState.DONE, ProcState.KILLED):
-            proc = self.table.new("session", payload={"session": session})
+            proc = self.table.new("session", payload={
+                "session": session, "role": "router", "channel": channel,
+            })
             session.pid = proc.pid
             session.created = time.time()
             self._session_tasks[proc.pid] = asyncio.create_task(
@@ -334,18 +341,12 @@ class Microkernel:
         if not self.triggers.claim(trig.id, 0):
             return self._trigger_dict(self.triggers.get(trig.id) or trig)
 
-        from kernel.agent_proc import AgentProcess
-
-        text = str((payload or {}).get("text") or (payload or {}).get("message") or
+        body = str((payload or {}).get("text") or (payload or {}).get("message") or
                    f"[{source}/{kind}] {thread_id}").strip()
-
-        async def routine(proc, mk):
-            return await AgentProcess(mk).run_turn(proc, text)
-
+        prompt = (f"[Trigger] source={source} kind={kind} thread={thread_id or '-'}\n"
+                  f"{body}\n\n先判断需不需要行动；需要就派 worker，不需要就说明原因。")
         try:
-            proc = await self.spawn("trigger-worker", routine,
-                                    payload={"trigger_id": trig.id, "thread": thread_id})
-            answer = await self.wait(proc.pid, timeout=120)
+            answer = await self.ask(prompt, channel="router", timeout=180)
             self.triggers.finish(trig.id, status="done", result=str(answer))
         except Exception as exc:  # noqa: BLE001
             self.triggers.finish(trig.id, status="failed",
@@ -480,6 +481,8 @@ class Microkernel:
                 "services": self.bus.endpoints() if self.bus else [],
                 "dispatcher": self.dispatcher.stats(),
                 "triggers": self.trigger_stats(),
+            "watchdog": self.watchdog.stats(),
+                "watchdog": self.watchdog.stats(),
                 "pager": graph,
                 "pages": pages,
                 "memory": memory,
@@ -515,6 +518,7 @@ class Microkernel:
             "services": self.bus.endpoints(),
             "dispatcher": self.dispatcher.stats(),
             "triggers": self.trigger_stats(),
+            "watchdog": self.watchdog.stats(),
             "pager": self.pager.graph.stats(),
             "pages": self.pager.mmu.stats(),
             "memory": self.pager.memory.stats(),

@@ -81,6 +81,7 @@ class ProcessTable:
         return [
             {"pid": p.pid, "name": p.name, "state": p.state.value,
              "parent": p.parent, "priority": p.priority,
+             "role": p.payload.get("role", ""),
              "elapsed": p.elapsed, "error": p.error}
             for p in procs
         ]

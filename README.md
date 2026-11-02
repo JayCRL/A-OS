@@ -165,14 +165,16 @@ web_search      web_fetch
 POST /api/trigger
   {source, kind, thread_id, priority, payload, dedupe_key}
   → 落库 / 去重 / 排序
-  → 派生 trigger-worker
+  → 交给 Router 进程（channel=router）
+  → Router 决定直接处理，或派 worker
   → 结果写回 trigger，不直接回用户
 ```
 
 - `queued / running / done / failed`；
 - dedupe key 防重复；
 - priority 排序；
-- 目前一个 trigger 一个 worker，Router 层还没接。
+- Router 的角色是 `router`，子代理 worker 的角色是 `worker`；
+- Watchdog 每 10s 检查超时 trigger，超时标 failed。
 
 ---
 
@@ -342,7 +344,7 @@ data/
 
 ```bash
 python3 -m unittest tests.test_chat tests.test_graph tests.test_microkernel
-# 60 tests
+# 61 tests
 ```
 
 记忆基线：
