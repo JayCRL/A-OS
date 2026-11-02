@@ -178,6 +178,7 @@ web_search  web_fetch
 - `plan/todo` 把步骤写进进程状态，每轮注入；
 - `agent/subagent` 派生 child pid，父进程等待汇总，最多两层；
 - `agent(tasks=[...])` 支持最多 4 个子任务并行 fan-out，并发 3；
+- `workflow(phases=[...])` 阶段内并行、阶段间串行，前序结果注入后一阶段；
 - `verify` 自动识别 pytest / package.json / compileall；代码 `edit` 后自动跑一次并回灌结果。
 
 ## 实时进程/记忆面板
