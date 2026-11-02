@@ -157,6 +157,23 @@ web_search      web_fetch
 
 工具步数上限 **24**，够走“读 → 改 → 跑 → 修”。
 
+### Trigger：Agent 层中断
+
+外部事件（IM、GitHub 评论、CI）走独立的 Trigger 队列：
+
+```
+POST /api/trigger
+  {source, kind, thread_id, priority, payload, dedupe_key}
+  → 落库 / 去重 / 排序
+  → 派生 trigger-worker
+  → 结果写回 trigger，不直接回用户
+```
+
+- `queued / running / done / failed`；
+- dedupe key 防重复；
+- priority 排序；
+- 目前一个 trigger 一个 worker，Router 层还没接。
+
 ---
 
 ## 长期记忆
@@ -325,7 +342,7 @@ data/
 
 ```bash
 python3 -m unittest tests.test_chat tests.test_graph tests.test_microkernel
-# 58 tests
+# 60 tests
 ```
 
 记忆基线：

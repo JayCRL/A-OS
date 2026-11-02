@@ -161,6 +161,24 @@ recall=3/3  broad_recall=3/3  add=0.37s
 
 这是召回基线，不是回答质量基线。
 
+## Trigger 队列
+
+`kernel/triggers.py` 是 Agent 层的中断控制器：
+
+```
+source/kind/payload/thread_id/priority/dedupe_key
+  → queued
+  → claim
+  → trigger-worker
+  → done / failed
+```
+
+- 去重：同一 dedupe_key 只处理一次；
+- 优先级：`priority DESC, id ASC`；
+- 外部入口：`POST /api/trigger`；
+- 查询：`GET /api/triggers`；
+- 当前未接 Router，worker 结果只回写 trigger。
+
 ## 外部壳接入（DSH）
 
 A-OS 提供两个只读/回写接口：
