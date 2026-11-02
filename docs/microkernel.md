@@ -142,6 +142,14 @@ recent_history(20)
 
 同进程用 `_PagerBridge`，split 走 pager RPC。
 
+### 事实失效与衰减
+
+- `memories` 增加 `superseded / valid_to`；
+- consolidation 的 `supersedes` 会把旧事实标记失效，不删除；
+- `recall/profile/recent` 过滤失效事实；
+- 未被引用的记忆按 0.995 缓慢衰减，只降可提取性；
+- 线上可以通过 `pager.stats.memory.superseded` 看失效数量。
+
 ### 1000 条基线
 
 `python3 -m tests.memory_eval`：
@@ -152,6 +160,20 @@ recall=3/3  broad_recall=3/3  add=0.37s
 ```
 
 这是召回基线，不是回答质量基线。
+
+## 工程工具
+
+VFS 现在提供：
+
+```
+read   list   glob   grep   search
+write  append edit   shell
+web_search  web_fetch
+```
+
+- `shell` 走工作区白名单沙箱，30 秒超时，输出截断；
+- `edit` 精确替换，改完失效对应页缓存；
+- AgentProcess 工具步数上限 24，够走"读→改→跑→修"。
 
 ## 实时进程/记忆面板
 
