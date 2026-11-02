@@ -35,6 +35,7 @@ write {"path":"a.md","content":"..."}         新建/覆盖文件
 append {"path":"note.txt","content":"..."}    追加
 edit {"path":"a.py","old":"x","new":"y"}      精确替换
 shell {"cmd":"pytest -q"}                     在工作区跑命令（白名单）
+verify {"cmd":"pytest -q"}                    跑项目测试/编译检查
 web_search {"query":"..."}                    联网搜索
 web_fetch {"url":"https://..."}               打开网页取正文"""
 
@@ -83,6 +84,8 @@ class Tools:
                 )
             elif name == "shell":
                 out = await self._shell(str(args.get("cmd", args.get("command", ""))))
+            elif name == "verify":
+                out = await self._verify(str(args.get("cmd", args.get("command", ""))))
             elif name == "search":
                 out = await asyncio.to_thread(self._search, str(args.get("query", args.get("keyword", ""))))
             elif name == "write":
@@ -218,6 +221,17 @@ class Tools:
             return "错误：命令为空"
         result = await self.shell.run(cmd)
         return f"$ {cmd}\n{result.output}"
+
+    async def _verify(self, cmd: str = "") -> str:
+        if not cmd:
+            if (self.root / "pytest.ini").exists() or (self.root / "pyproject.toml").exists() \
+                    or (self.root / "tests").is_dir():
+                cmd = "python3 -m pytest -q"
+            elif (self.root / "package.json").exists():
+                cmd = "npm test"
+            else:
+                cmd = "python3 -m compileall -q ."
+        return await self._shell(cmd)
 
     def _list(self, path: str) -> str:
         target = self._resolve(path)

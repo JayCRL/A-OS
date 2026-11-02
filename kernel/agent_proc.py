@@ -73,6 +73,7 @@ class AgentProcess:
         answer: str | None = None
         last_prompt = ""
         last_pages: list[int] = []
+        plan = list(proc.payload.get("plan") or [])
         used_web = False
         web_nudged = False
         used_write = False
@@ -88,7 +89,11 @@ class AgentProcess:
             last_prompt = composed["prompt"]
             last_pages = list(composed.get("pages") or [])
             if trace:
-                last_prompt += "\n\n===【本轮进展】===\n" + "\n".join(trace[-4:])
+                last_prompt += "\n\n===【本轮进展】===\n" + "\n".join(trace[-6:])
+            if plan:
+                last_prompt += "\n\n当前计划：\n" + "\n".join(
+                    f"{i}. {item}" for i, item in enumerate(plan, 1)
+                )
 
             reply = await self.k.model.chat(
                 [{"role": "user", "content": last_prompt}], max_tokens=1100
@@ -101,7 +106,35 @@ class AgentProcess:
                 args = payload.get("args") if isinstance(payload.get("args"), dict) else {
                     k: v for k, v in payload.items() if k not in ("tool", "action", "args")
                 }
-                result = await self.bus.call("vfs", "run", name=name, args=args)
+                if name in ("plan", "todo"):
+                    items = args.get("items") or args.get("tasks") or args.get("plan") or []
+                    if isinstance(items, str):
+                        items = [items]
+                    plan = [str(x).strip() for x in items if str(x).strip()][:12]
+                    proc.payload["plan"] = plan
+                    result = "计划已记录：\n" + "\n".join(
+                        f"{i}. {x}" for i, x in enumerate(plan, 1)
+                    )
+                elif name in ("agent", "subagent"):
+                    task = str(args.get("task") or args.get("prompt") or "").strip()
+                    depth = int(proc.payload.get("depth", 0) or 0)
+                    if not task:
+                        result = "错误：子任务为空"
+                    elif depth >= 2:
+                        result = "错误：子代理层级过深"
+                    else:
+                        async def _child(child_proc, mk, _task=task):
+                            return await AgentProcess(mk).run_turn(child_proc, _task)
+                        try:
+                            child = await self.k.spawn(
+                                "subagent", _child, parent=proc.pid,
+                                payload={"depth": depth + 1},
+                            )
+                            result = f"子代理 #{child.pid}：{await self.k.wait(child.pid, timeout=120)}"
+                        except Exception as exc:  # noqa: BLE001
+                            result = f"子代理失败：{type(exc).__name__}: {exc}"
+                else:
+                    result = await self.bus.call("vfs", "run", name=name, args=args)
                 if len(result) > 4000:
                     result = result[:4000].rsplit("\n", 1)[0]
                 if name in ("write", "append", "edit", "shell"):
@@ -113,6 +146,9 @@ class AgentProcess:
                 if name in ("write", "append", "edit"):
                     path = str(args.get("path", ""))
                     await self.bus.call("pager", "invalidate", source=path)
+                    if name == "edit" and path.endswith((".py", ".js", ".ts", ".go", ".rs", ".java")):
+                        check = await self.bus.call("vfs", "run", name="verify", args={})
+                        result += "\n\n[自动验收]\n" + str(check)[:1600]
                 await self.bus.call("kernel", "state_add", pid=proc.pid,
                                     content=f"{name} {args.get('path', '')}"[:70], kind="act")
                 await self.bus.call("kernel", "journal_checkpoint", task_id=task_id,

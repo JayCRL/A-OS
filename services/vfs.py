@@ -15,7 +15,7 @@ from typing import Any
 from kernel.tools import Tools
 
 TOOL_NAMES = {"read", "list", "glob", "grep", "search", "write", "append",
-              "edit", "shell", "web_search", "web_fetch"}
+              "edit", "shell", "verify", "web_search", "web_fetch"}
 
 
 class VFSService:

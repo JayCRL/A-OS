@@ -210,6 +210,36 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(answer, "改完了。")
         self.assertEqual((self.home / "workspace" / "note.txt").read_text(), "beta\n")
 
+    async def test_plan_tool_persists_in_process(self) -> None:
+        model = ScriptModel([
+            '{"tool":"plan","items":["查资料","写代码","跑测试"]}',
+            "计划好了。",
+        ])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        answer = await self.mk.ask("帮我做个登录页")
+        self.assertEqual(answer, "计划好了。")
+        proc = next(p for p in self.mk.table._procs.values() if p.name == "session")
+        self.assertEqual(proc.payload.get("plan"), ["查资料", "写代码", "跑测试"])
+
+    async def test_subagent_returns_result_to_parent(self) -> None:
+        model = ScriptModel([
+            '{"tool":"agent","task":"查一下登录越权怎么修"}',
+            "子代理说：用方案 C。",
+            "父进程总结：按方案 C 修。",
+        ])
+        self.mk.model = model
+        self.mk.librarian.model = model
+        answer = await self.mk.ask("研究一下登录越权")
+        self.assertIn("方案 C", answer)
+        procs = await self.mk.bus.call("kernel", "processes")
+        self.assertTrue(any(p["name"] == "subagent" and p["state"] == "done" for p in procs), procs)
+
+    async def test_verify_tool_runs_command(self) -> None:
+        out = await self.mk.bus.call("vfs", "run", name="verify",
+                                     args={"cmd": 'python3 -c "print(7)"'})
+        self.assertIn("7", out)
+
     async def test_engineering_tools_read_edit_grep_shell(self) -> None:
         run = lambda name, **args: self.mk.bus.call("vfs", "run", name=name, args=args)
         out = await run("write", path="calc.py", content="def add(a, b):\n    return a + b\n")
