@@ -174,7 +174,10 @@ web_search  web_fetch
 - `shell` 走工作区白名单沙箱，30 秒超时，输出截断；
 - `edit` 精确替换，改完失效对应页缓存；
 - AgentProcess 工具步数上限 24，够走"读→改→跑→修"；
-- 没实际调用 edit/write/shell 时，回答里声称"改好了"会被系统打回一次。
+- 没实际调用 edit/write/shell 时，回答里声称"改好了"会被系统打回一次；
+- `plan/todo` 把步骤写进进程状态，每轮注入；
+- `agent/subagent` 派生 child pid，父进程等待汇总，最多两层；
+- `verify` 自动识别 pytest / package.json / compileall；代码 `edit` 后自动跑一次并回灌结果。
 
 ## 实时进程/记忆面板
 
