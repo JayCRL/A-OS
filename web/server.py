@@ -42,6 +42,31 @@ def make_app(agent) -> web.Application:
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
         return web.json_response({"ok": True, "reply": reply})
 
+    async def memory_recall(request):
+        data = await request.json()
+        text = str(data.get("text", data.get("query", ""))).strip()
+        if not text:
+            return web.json_response({"ok": False, "error": "text 为空"}, status=400)
+        try:
+            budget = max(400, min(6000, int(data.get("budget", 2400))))
+            out = await agent.recall_memory(text, budget=budget)
+            return web.json_response({"ok": True, **out})
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def memory_commit(request):
+        data = await request.json()
+        user = str(data.get("user", "")).strip()
+        answer = str(data.get("answer", "")).strip()
+        session = str(data.get("session", "dsh")).strip() or "dsh"
+        if not user:
+            return web.json_response({"ok": False, "error": "user 为空"}, status=400)
+        try:
+            out = await agent.commit_memory_turn(session=session, user=user, answer=answer)
+            return web.json_response({"ok": True, **out})
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
     async def debug(_req):
         return web.json_response(agent.debug_snapshot())
 
@@ -74,6 +99,8 @@ def make_app(agent) -> web.Application:
     app.router.add_get("/api/history", history)
     app.router.add_post("/api/chat", chat)
     app.router.add_get("/api/debug", debug)
+    app.router.add_post("/api/memory/recall", memory_recall)
+    app.router.add_post("/api/memory/commit", memory_commit)
     app.router.add_get("/ws", ws_handler)
     return app
 

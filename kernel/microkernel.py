@@ -321,6 +321,23 @@ class Microkernel:
     async def reply(self, text: str) -> str:
         return await self.ask(text, channel="web")
 
+    async def recall_memory(self, text: str, *, budget: int = 2400) -> dict:
+        """给 DSH 壳用的只读记忆块；不改页表，不创建进程。"""
+        if self.split:
+            return await self.bus.call("pager", "recall_context", query=text, budget=budget)
+        return await self.pager.recall_context(text, budget=budget)
+
+    async def commit_memory_turn(self, *, session: str, user: str, answer: str) -> dict:
+        """外部壳写完一轮后回写；事实抽取仍走 librarian。"""
+        if self.split:
+            out = await self.bus.call("pager", "commit_external", user=user,
+                                      answer=answer, session=session)
+            await self.bus.call("librarian", "observe", user=user, answer=answer)
+            return out
+        out = self.pager.commit_external(user, answer, session)
+        await self.librarian.handle("observe", {"user": user, "answer": answer})
+        return out
+
     @property
     def memory(self):
         if self.split:

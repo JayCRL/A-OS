@@ -78,6 +78,15 @@ class PagerService:
             )
         if method == "commit_memory":
             return {"added": self.commit_memory(list(params.get("items") or []))}
+        if method == "recall_context":
+            return await self.recall_context(
+                str(params.get("query", "")), int(params.get("budget", 2400)),
+            )
+        if method == "commit_external":
+            return self.commit_external(
+                str(params.get("user", "")), str(params.get("answer", "")),
+                str(params.get("session", "external")),
+            )
         if method == "prefetch":
             return await self.prefetch(int(params["pid"]), str(params.get("query", "")))
         if method == "fault":
@@ -245,6 +254,44 @@ class PagerService:
             pid=pid,
         )
         return {"prompt": prompt, "pages": ids, "budget": budget}
+
+    async def recall_context(self, query: str, budget: int = 2400) -> dict:
+        """给外部壳（DSH）用的只读记忆块，不写页表、不占 pid。"""
+
+        if not query.strip():
+            return {"context": "", "tokens": 0, "pages": []}
+        blocks: list[str] = []
+        pages: list[str] = []
+        for _score, mem in self.memory.recall(query, k=8, max_tokens=max(400, budget // 2)):
+            blocks.append(f"- {mem.text}")
+            pages.append(f"mem:{mem.id}")
+        nodes = self.retriever.retrieve(query, k=3)
+        if any(n.type != "project" for n in nodes):
+            for node in nodes[:3]:
+                blocks.append(f"- {self.graph.render(node)}")
+                pages.append(f"graph:{node.id}")
+        if self.bus is not None:
+            try:
+                hits = await self.bus.call("vfs", "semantic", query=query, k=3)
+            except Exception:
+                hits = []
+            for hit in hits[:2]:
+                if float(hit.get("score", 0)) < 0.30:
+                    continue
+                blocks.append(f"- 文件 {hit.get('path', '')}: {str(hit.get('text', ''))[:700]}")
+                pages.append(str(hit.get("source", "")))
+        text = "\n".join(blocks)
+        if len(text) > budget * 3:
+            text = text[: budget * 3]
+        return {"context": text, "tokens": (len(text) + 2) // 3, "pages": pages}
+
+    def commit_external(self, user: str, answer: str, session: str = "external") -> dict:
+        user = (user or "").strip()
+        answer = (answer or "").strip()
+        if not user:
+            return {"ok": False}
+        self.memory.add(user, kind="episode", importance=0.4, source=f"dsh:{session}")
+        return {"ok": True, "session": session}
 
     async def prefetch(self, pid: int, query: str) -> dict:
         """自动预取：图节点 + VFS 文件块，不需要模型发缺页。"""

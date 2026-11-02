@@ -462,6 +462,18 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(pages, "没有显式缺页时也应自动换入 VFS 文件块")
         self.assertTrue(any(p.source.startswith("file:") for p in pages))
 
+    async def test_memory_bridge_methods(self) -> None:
+        self.mk.pager.memory.add("用户喜欢青竹", kind="fact", importance=0.8)
+        out = await self.mk.recall_memory("我喜欢什么")
+        self.assertIn("青竹", out["context"])
+        self.assertGreater(out["tokens"], 0)
+        res = await self.mk.commit_memory_turn(
+            session="dsh-test", user="我今天去了青竹馆", answer="记下了",
+        )
+        self.assertTrue(res["ok"])
+        texts = [m.text for m in self.mk.pager.memory.all()]
+        self.assertTrue(any("青竹馆" in t for t in texts), texts)
+
     async def test_web_routes_use_microkernel(self) -> None:
         from aiohttp.test_utils import TestClient, TestServer
         from web.server import make_app
@@ -483,6 +495,14 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(hist["turns"]), 2)
             dbg = await (await client.get("/api/debug")).json()
             self.assertIn("kernel", dbg)
+            self.mk.pager.memory.add("用户喜欢青竹", kind="fact", importance=0.8)
+            rec = await (await client.post("/api/memory/recall", json={"text": "我喜欢什么"})).json()
+            self.assertTrue(rec["ok"], rec)
+            self.assertIn("青竹", rec["context"])
+            com = await (await client.post("/api/memory/commit", json={
+                "session": "dsh", "user": "去了青竹馆", "answer": "好",
+            })).json()
+            self.assertTrue(com["ok"], com)
         finally:
             await client.close()
 
