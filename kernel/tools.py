@@ -111,6 +111,10 @@ class Tools:
 
     def _resolve(self, raw: str) -> Path:
         rel = (raw or ".").strip().replace("\\", "/").lstrip("/")
+        if rel == "workspace":
+            rel = "."
+        elif rel.startswith("workspace/"):
+            rel = rel[len("workspace/"):]
         target = (self.root / rel).resolve()
         if target != self.root and self.root not in target.parents:
             raise PermissionError(f"路径超出工作区：{raw}")
