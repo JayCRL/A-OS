@@ -22,12 +22,14 @@ SYSTEM = """你是 A-OS 的编目器。判断这一轮对话是否属于一个�
 只输出一个 JSON 对象，不要解释：
 {"noise": false,
  "facts": [{"text": "第三人称陈述", "kind": "identity|preference|fact|plan", "importance": 0.0}],
+ "supersedes": ["被这条新事实覆盖的旧事实"],
  "module": "模块名", "task": "任务名", "success": false,
  "lesson": "一句经验", "artifact": "产物路径", "depends_on": []}
 
 规则：
 - facts 每轮都要抽：用户是谁、偏好、重要事实、计划；最多 4 条；寒暄/情绪/临时问答不算
 - facts 用第三人称，一条只讲一件事；没有就 []
+- 用户改口/搬家/换计划时，把旧事实原文放进 supersedes
 - noise 只表示"没有可归档的任务"，不代表没有 facts；纯闲聊也可以 noise=true 但有 facts
 - module 是项目里的模块/页面/文件，不是"用户"
 - task 是一件事，不是一句话
@@ -78,13 +80,14 @@ class LibrarianService:
     name = "librarian"
 
     def __init__(self, graph: GraphStore | None = None, *, model=None,
-                 backend=None, fact_sink=None, project: str = "main",
+                 backend=None, fact_sink=None, supersede_sink=None, project: str = "main",
                  idle_seconds: float = 600.0, min_batch: int = 4,
                  max_batch: int = 40) -> None:
         self.graph = graph
         self.model = model
         self.backend = backend
         self.fact_sink = fact_sink
+        self.supersede_sink = supersede_sink
         self.idle_seconds = max(1.0, float(idle_seconds))
         self.min_batch = max(2, int(min_batch))
         self.max_batch = max(self.min_batch, int(max_batch))
@@ -168,6 +171,13 @@ class LibrarianService:
             data = await self.extractor.extract(
                 str(item.get("user", "")), str(item.get("answer", ""))
             )
+        for old in list(data.get("supersedes") or []):
+            if not str(old).strip():
+                continue
+            if self.supersede_sink is not None:
+                self.supersede_sink(str(old))
+            elif self.backend is not None:
+                await self.backend.call("pager", "supersede_facts", text=str(old))
         facts = list(data.get("facts") or [])
         if not facts and "记住" in str(item.get("user", "")):
             cleaned = str(item.get("user", "")).replace("记住", "").replace("记得", "").strip("，。 ：:")

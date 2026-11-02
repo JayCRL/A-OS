@@ -83,6 +83,7 @@ class Microkernel:
                 self.pager.graph, model=self.model,
                 backend=_PagerBridge(self.pager),
                 fact_sink=self.pager.commit_memory,
+                supersede_sink=self.pager.memory.supersede,
             )
             self.vfs = VFSService(self.home, self.encoder)
         self._last: dict = {}

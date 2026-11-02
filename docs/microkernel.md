@@ -145,7 +145,7 @@ recent_history(20)
 ### 事实失效与衰减
 
 - `memories` 增加 `superseded / valid_to`；
-- consolidation 的 `supersedes` 会把旧事实标记失效，不删除；
+- 每轮 extractor 和 consolidation 的 `supersedes` 都会把旧事实标记失效，不删除；
 - `recall/profile/recent` 过滤失效事实；
 - 未被引用的记忆按 0.995 缓慢衰减，只降可提取性；
 - 线上可以通过 `pager.stats.memory.superseded` 看失效数量。

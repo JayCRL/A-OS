@@ -50,6 +50,22 @@ class FactModel:
         return ModelReply("好，记住了。", Usage(10, 5))
 
 
+class ConflictModel:
+    ready = True
+
+    def __init__(self) -> None:
+        self.usage = Usage()
+
+    async def chat(self, messages, *, max_tokens=512, temperature=0.3):
+        system = str(messages[0].get("content", ""))
+        if "编目器" in system:
+            return ModelReply(
+                '{"noise": true, "facts": [{"text": "用户住在上海", "kind": "identity", "importance": 0.8}], '
+                '"supersedes": ["用户住在北京"]}', Usage(10, 10),
+            )
+        return ModelReply("好，上海。", Usage(10, 5))
+
+
 class SummaryModel:
     ready = True
 
@@ -210,6 +226,20 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         texts = [m.text for _s, m in hits]
         self.assertFalse(any("北京" in t for t in texts), texts)
         self.assertTrue(any("上海" in t for t in texts), texts)
+
+    async def test_conflict_supersedes_immediately(self) -> None:
+        self.mk.pager.memory.add("用户住在北京", kind="identity", importance=0.8)
+        model = ConflictModel()
+        self.mk.model = model
+        self.mk.librarian.model = model
+        self.mk.librarian.extractor.model = model
+        await self.mk.ask("我搬去上海了")
+        await self.mk.bus.call("librarian", "flush")
+        profile = [m.text for m in self.mk.pager.memory.profile()]
+        self.assertTrue(any("上海" in text for text in profile), profile)
+        self.assertFalse(any("北京" in text for text in profile), profile)
+        stats = await self.mk.bus.call("pager", "stats")
+        self.assertGreaterEqual(stats["memory"].get("superseded", 0), 1, stats)
 
     async def test_memory_events_and_consolidation(self) -> None:
         model = SummaryModel()
