@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import traceback
 from pathlib import Path
 from typing import Any
@@ -78,16 +79,24 @@ class LibrarianService:
 
     def __init__(self, graph: GraphStore | None = None, *, model=None,
                  backend=None, fact_sink=None, project: str = "main",
-                 summary_every: int = 8) -> None:
+                 idle_seconds: float = 600.0, min_batch: int = 4,
+                 max_batch: int = 40) -> None:
         self.graph = graph
         self.model = model
         self.backend = backend
         self.fact_sink = fact_sink
-        self.summary_every = max(2, int(summary_every))
+        self.idle_seconds = max(1.0, float(idle_seconds))
+        self.min_batch = max(2, int(min_batch))
+        self.max_batch = max(self.min_batch, int(max_batch))
         self.extractor = LLMExtractor(model)
         self.consolidator = Consolidator(graph, project=project) if graph is not None else None
         self.queue: asyncio.Queue = asyncio.Queue()
         self._worker: asyncio.Task | None = None
+        self._idle_task: asyncio.Task | None = None
+        self._busy = False
+        self._consolidating = False
+        self._unconsolidated = 0
+        self._last_activity = time.time()
         self.processed = 0
         self.skipped = 0
         self.errors = 0
@@ -99,6 +108,8 @@ class LibrarianService:
     async def start(self) -> None:
         if self._worker is None:
             self._worker = asyncio.create_task(self._run(), name="svc:librarian-worker")
+        if self._idle_task is None and self.backend is not None:
+            self._idle_task = asyncio.create_task(self._idle_loop(), name="svc:librarian-idle")
 
     async def handle(self, method: str, params: dict) -> Any:
         if method == "observe":
@@ -106,6 +117,9 @@ class LibrarianService:
             return {"queued": self.queue.qsize()}
         if method == "flush":
             await self.queue.join()
+            return self.stats()
+        if method == "consolidate":
+            await self._consolidate(force=True)
             return self.stats()
         if method == "stats":
             return self.stats()
@@ -120,6 +134,8 @@ class LibrarianService:
             "last_error": self.last_error,
             "summaries": self.summaries,
             "last_summary": self.last_summary,
+            "idle_seconds": self.idle_seconds,
+            "unconsolidated": self._unconsolidated,
             "graph": self.graph.stats() if self.graph is not None else {},
             "remote": self.backend is not None,
         }
@@ -127,12 +143,13 @@ class LibrarianService:
     async def _run(self) -> None:
         while True:
             item = await self.queue.get()
+            self._busy = True
             try:
                 await self._ingest(item)
                 self.processed += 1
                 self._turns += 1
-                if self.summary_every and self._turns % self.summary_every == 0:
-                    await self._consolidate()
+                self._unconsolidated += 1
+                self._last_activity = time.time()
             except asyncio.CancelledError:
                 self.queue.task_done()
                 raise
@@ -141,6 +158,7 @@ class LibrarianService:
                 self.last_error = f"{type(exc).__name__}: {exc}"
                 traceback.print_exc()
             finally:
+                self._busy = False
                 self.queue.task_done()
 
     async def _ingest(self, item: dict) -> None:
@@ -189,15 +207,31 @@ class LibrarianService:
         else:
             self.skipped += 1
 
-    async def _consolidate(self) -> None:
-        if self.model is None or self.backend is None:
+    async def _idle_loop(self) -> None:
+        while True:
+            interval = max(0.1, min(1.0, self.idle_seconds / 5))
+            await asyncio.sleep(interval)
+            if self._busy or self._consolidating or not self.queue.empty():
+                continue
+            if self._unconsolidated < self.min_batch:
+                continue
+            idle = time.time() - self._last_activity
+            if idle < self.idle_seconds and self._unconsolidated < self.max_batch:
+                continue
+            await self._consolidate()
+
+    async def _consolidate(self, *, force: bool = False) -> None:
+        if self._consolidating or self.model is None or self.backend is None:
             return
+        if not force and self._unconsolidated < self.min_batch:
+            return
+        self._consolidating = True
         try:
-            history = await self.backend.call("pager", "recent_history", limit=20)
+            history = await self.backend.call("pager", "recent_history", limit=40)
             if len(history) < 4:
                 return
             lines = []
-            for turn in history[-20:]:
+            for turn in history[-40:]:
                 who = "用户" if turn.get("role") == "user" else "助手"
                 lines.append(f"{who}：{str(turn.get('text', ''))[:400]}")
             reply = await self.model.chat(
@@ -218,16 +252,27 @@ class LibrarianService:
             facts = list(data.get("facts") or [])
             if facts:
                 await self.backend.call("pager", "commit_memory", items=facts)
+            self._unconsolidated = 0
+            self._last_activity = time.time()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             self.errors += 1
             self.last_error = f"consolidate: {type(exc).__name__}: {exc}"
+        finally:
+            self._consolidating = False
 
     async def close(self) -> None:
         await self.queue.join()
         if self.backend is not None:
             await self.backend.close()
+        if self._idle_task:
+            self._idle_task.cancel()
+            try:
+                await self._idle_task
+            except asyncio.CancelledError:
+                pass
+            self._idle_task = None
         if self._worker:
             self._worker.cancel()
             try:

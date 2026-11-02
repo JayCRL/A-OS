@@ -125,9 +125,12 @@ ts, pid, query, page_ids, used_ids, outcome, tokens, latency
 
 用于后面做 bandit / 归因；现在 `used_ids` 和 `outcome` 先留空，不假装有奖励。
 
-### 每 8 轮 consolidation
+### 空闲 consolidation
 
-librarian 在 `observe` 满 8 条后触发：
+librarian 在**空闲 10 分钟**后触发（至少积累 4 条，40 条兜底）：
+
+- 不在对话进行中切摘要；
+- 长时间没任务才像"休息"一样巩固；
 
 ```
 recent_history(20)

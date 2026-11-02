@@ -47,7 +47,7 @@ class _PagerBridge:
 
 class Microkernel:
     def __init__(self, home: str | Path = "/opt/aos/data", *, model=None,
-                 encoder=None, split: bool = False, summary_every: int = 8) -> None:
+                 encoder=None, split: bool = False) -> None:
         self.home = Path(home)
         self.home.mkdir(parents=True, exist_ok=True)
         self.split = split
@@ -83,7 +83,6 @@ class Microkernel:
                 self.pager.graph, model=self.model,
                 backend=_PagerBridge(self.pager),
                 fact_sink=self.pager.commit_memory,
-                summary_every=summary_every,
             )
             self.vfs = VFSService(self.home, self.encoder)
         self._last: dict = {}

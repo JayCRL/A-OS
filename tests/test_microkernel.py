@@ -185,10 +185,14 @@ class MicrokernelTests(unittest.IsolatedAsyncioTestCase):
         self.mk.model = model
         self.mk.librarian.model = model
         self.mk.librarian.extractor.model = model
-        self.mk.librarian.summary_every = 2
+        self.mk.librarian.idle_seconds = 0.2
+        self.mk.librarian.min_batch = 2
         await self.mk.ask("我叫阿测")
         await self.mk.ask("我下周三去北京")
+        await asyncio.sleep(1.2)
         await self.mk.bus.call("librarian", "flush")
+        lstats = await self.mk.bus.call("librarian", "stats")
+        self.assertGreaterEqual(lstats["summaries"], 1, lstats)
         stats = await self.mk.bus.call("pager", "stats")
         self.assertGreaterEqual(stats["memory"]["by_kind"].get("summary", 0), 1, stats)
         events = await self.mk.bus.call("pager", "event_stats")
